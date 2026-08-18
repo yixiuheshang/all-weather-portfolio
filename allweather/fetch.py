@@ -6,7 +6,7 @@ import time
 import math
 import requests
 import pandas as pd
-from .config import DATA_DIR, BACKTEST_END
+from .config import DATA_DIR, BACKTEST_END, ETF_META
 
 RETRY_TIMES = 3
 RETRY_DELAY = 5  # 秒
@@ -248,6 +248,122 @@ def fetch_cgb_yields():
         return None
 
 
+def _etf_market_symbol(code: str) -> str:
+    """腾讯/新浪行情代码：深市 15/16/12 开头，其余沪市。"""
+    prefix = "sz" if str(code).startswith(("15", "16", "12")) else "sh"
+    return prefix + str(code)
+
+
+def _parse_tencent_bars(payload, symbol: str) -> list:
+    block = (payload or {}).get("data", {}).get(symbol, {}) or {}
+    return block.get("day") or block.get("qfqday") or []
+
+
+def _fetch_etf_market_close_tencent(code: str) -> pd.DataFrame:
+    """不复权场内日K（腾讯）。K 线格式 [日期, 开, 收, 高, 低, 量]。"""
+    symbol = _etf_market_symbol(code)
+    url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+    params = {"param": f"{symbol},day,,,2000,"}
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://gu.qq.com/",
+    }
+    r = requests.get(url, params=params, headers=headers, timeout=30)
+    r.raise_for_status()
+    bars = _parse_tencent_bars(r.json(), symbol)
+    if not bars:
+        raise ValueError(f"{symbol}: 腾讯行情为空")
+    df = pd.DataFrame(bars)
+    df = df.iloc[:, [0, 2]].copy()
+    df.columns = ["date", "close"]
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
+    df = df.dropna(subset=["date", "close"])
+    return df.sort_values("date").reset_index(drop=True)
+
+
+def _fetch_etf_market_close_sina(code: str) -> pd.DataFrame:
+    """不复权场内日K（新浪），腾讯失败时回退。"""
+    symbol = _etf_market_symbol(code)
+    url = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
+    params = {"symbol": symbol, "scale": 240, "ma": "no", "datalen": 1023}
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r = requests.get(url, params=params, headers=headers, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+    if not data:
+        raise ValueError(f"{symbol}: 新浪行情为空")
+    df = pd.DataFrame(data).rename(columns={"day": "date"})
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
+    df = df.dropna(subset=["date", "close"])
+    return df[["date", "close"]].sort_values("date").reset_index(drop=True)
+
+
+def fetch_one_market_px(code: str) -> pd.DataFrame:
+    last_err = None
+    for attempt in range(1, RETRY_TIMES + 1):
+        try:
+            try:
+                return _fetch_etf_market_close_tencent(code)
+            except Exception:
+                return _fetch_etf_market_close_sina(code)
+        except Exception as e:
+            last_err = e
+            if attempt < RETRY_TIMES:
+                print(f"    重试 {attempt}/{RETRY_TIMES - 1}，等待 {RETRY_DELAY}s... ({e})", flush=True)
+                time.sleep(RETRY_DELAY)
+    raise last_err
+
+
+def fetch_market_prices(force: bool = False):
+    """拉取 ETF 不复权场内收盘价，写入 data/{asset}_px.csv。
+
+    与累计净值 CSV 分开：净值用于策略权重/信号，场内收盘价用于下单股数。
+    """
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    ok, errors, up_to_date = {}, [], []
+    for asset, meta in ETF_META.items():
+        code = meta["code"]
+        path = DATA_DIR / f"{asset}_px.csv"
+        print(f"  >> {asset}_px ({code}) 场内收盘", flush=True)
+        try:
+            df = fetch_one_market_px(code)
+            if path.exists() and not force:
+                existing = pd.read_csv(path, parse_dates=["date"])
+                combined = pd.concat([existing, df], ignore_index=True)
+                combined = combined.drop_duplicates(subset="date").sort_values("date").reset_index(drop=True)
+                new_rows = len(combined) - len(existing)
+                if new_rows <= 0 and not existing.empty and combined["date"].max() == existing["date"].max():
+                    up_to_date.append(f"{asset}_px")
+                    print(f"    skip 已最新 {existing['date'].max().date()}")
+                    continue
+                combined.to_csv(path, index=False)
+                ok[f"{asset}_px"] = (combined["date"].min(), combined["date"].max(), len(combined))
+                print(f"    ok  {combined['date'].min().date()} → {combined['date'].max().date()}  +{new_rows} 行")
+            else:
+                df.to_csv(path, index=False)
+                ok[f"{asset}_px"] = (df["date"].min(), df["date"].max(), len(df))
+                print(f"    ok  {df['date'].min().date()} → {df['date'].max().date()}  n={len(df)}")
+        except Exception as e:
+            errors.append(f"{asset}_px: {str(e)[:200]}")
+            print(f"    FAIL  {e}")
+    return ok, errors, up_to_date
+
+
+def load_market_px_panel() -> pd.DataFrame:
+    """8 资产场内收盘价面板，列名与 ETF_META 资产键一致。"""
+    dfs = {}
+    for asset in ETF_META:
+        fp = DATA_DIR / f"{asset}_px.csv"
+        if fp.exists():
+            df = pd.read_csv(fp, parse_dates=["date"], index_col="date")
+            dfs[asset] = df["close"]
+    if not dfs:
+        return pd.DataFrame()
+    return pd.DataFrame(dfs).sort_index().ffill()
+
+
 def fetch_all(force: bool = False, start: str = DEFAULT_START, end: str = DEFAULT_END):
     """拉取所有目标资产。支持增量更新 —— 已有文件只补充缺失日期。
 
@@ -318,6 +434,11 @@ def fetch_all(force: bool = False, start: str = DEFAULT_START, end: str = DEFAUL
         print(f"    ok  n={len(yield_df)}")
     else:
         print(f"    WARN  中债收益率曲线拉取失败，将使用久期放大回退方案合成 30Y")
+
+    px_ok, px_err, px_fresh = fetch_market_prices(force=force)
+    ok.update(px_ok)
+    errors.extend(px_err)
+    up_to_date.extend(px_fresh)
 
     print(f"\n=== 拉取摘要 ===")
     print(f"  成功: {len(ok)}    已最新: {len(up_to_date)}    失败: {len(errors)}")

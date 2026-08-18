@@ -20,6 +20,7 @@ from allweather.rebalance import (
     STRATEGIES,
     ETF_META,
 )
+from allweather.fetch import load_market_px_panel, fetch_market_prices
 from allweather.config import (
     DATA_DIR,
     GOLD_DIP_THRESHOLD,
@@ -30,7 +31,12 @@ from allweather.config import (
     SP500_TREND_WINDOW,
 )
 
-st.set_page_config(page_title="全天候再平衡", page_icon="🌤️", layout="wide")
+st.set_page_config(
+    page_title="全天候再平衡",
+    page_icon="🌤️",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 st.markdown("""<style>
 [role="tab"] { color: #a0a8c0 !important; }
@@ -41,7 +47,13 @@ st.markdown("""<style>
 [data-testid="stDeployButton"] { display: none; }
 [data-testid="stDecoration"] { display: none; }
 #MainMenu { visibility: hidden; }
-header[data-testid="stHeader"] { display: none; }
+header [data-testid="stToolbar"] { display: none; }
+/* 不能隐藏整个 header：折叠按钮在里面，藏掉后侧栏再也打不开 */
+[data-testid="collapsedControl"] {
+  display: flex !important;
+  visibility: visible !important;
+  z-index: 1000000 !important;
+}
 </style>""", unsafe_allow_html=True)
 
 # ============================================================
@@ -147,28 +159,20 @@ def _check_data_staleness():
 # Sidebar
 # ============================================================
 st.sidebar.title("🌤️ 全天候再平衡")
+st.sidebar.caption("策略和现金档位在主页面顶部切换。")
 
-_strat_display = {"B-Con": "V3-B 保守增强", "B-RP": "V3-B 风险平价", "V3c": "V3c 多元"}
-strat_key = st.sidebar.radio(
-    "策略",
-    ["B-Con", "B-RP", "V3c"],
-    format_func=lambda k: _strat_display[k],
-)
-tier = st.sidebar.radio(
-    "现金档位",
-    ["100", "85", "70"],
-    format_func=lambda t: f"{t}% RP",
-)
-
-# 自动拉取：数据超过 1 天就增量更新
+# 自动拉取：净值超过 1 个交易日则增量更新；场内收盘价每次会话都刷新（当日 15:00 后即可用）
 staleness_days, staleness_asset = _check_data_staleness()
 if "auto_fetch_done" not in st.session_state:
     st.session_state.auto_fetch_done = False
 
-if staleness_days is not None and staleness_days > 1 and not st.session_state.auto_fetch_done:
+if not st.session_state.auto_fetch_done:
     from allweather.fetch import fetch_all
     today_str = date.today().strftime("%Y%m%d")
-    fetch_all(force=False, end=today_str)
+    if staleness_days is not None and staleness_days > 1:
+        fetch_all(force=False, end=today_str)
+    else:
+        fetch_market_prices(force=False)
     st.session_state.auto_fetch_done = True
     st.cache_data.clear()
     st.rerun()
@@ -221,13 +225,42 @@ def _load_live_prices():
 def _load_prices_and_signals():
     prices = _load_live_prices()
     signals = compute_signal_states(prices)
-    return prices, signals
+    market_px = load_market_px_panel()
+    return prices, signals, market_px
 
 
-prices, signals = _load_prices_and_signals()
+prices, signals, market_px = _load_prices_and_signals()
 
 last_date = prices.index[-1].strftime("%Y-%m-%d")
-st.sidebar.caption(f"数据截止: {last_date}")
+st.sidebar.caption(f"净值截止: {last_date}")
+if market_px is not None and not market_px.empty:
+    px_date = market_px.dropna(how="all").index.max().strftime("%Y-%m-%d")
+    st.sidebar.caption(f"场内收盘: {px_date}")
+else:
+    px_date = None
+    st.sidebar.error("缺少场内收盘价，建仓/调仓股数不可用")
+
+# ============================================================
+# 主区：策略切换（不放侧栏，避免折叠后找不到）
+# ============================================================
+_strat_display = {"B-Con": "V3-B 保守增强", "B-RP": "V3-B 风险平价", "V3c": "V3c 多元"}
+_sel1, _sel2 = st.columns(2)
+with _sel1:
+    strat_key = st.radio(
+        "策略",
+        ["B-Con", "B-RP", "V3c"],
+        format_func=lambda k: _strat_display[k],
+        horizontal=True,
+        key="strat_key",
+    )
+with _sel2:
+    tier = st.radio(
+        "现金档位",
+        ["100", "85", "70"],
+        format_func=lambda t: f"{t}% RP",
+        horizontal=True,
+        key="tier",
+    )
 
 missing = [a for a in STRATEGIES[strat_key]["assets"] if a not in prices.columns]
 if missing:
@@ -243,9 +276,19 @@ w0 = compute_target_weights(strat_key, prices, cash_ratio)
 w = apply_signal_overrides(strat_key, w0, signals, prices)
 cfg = STRATEGIES[strat_key]
 
-# ============================================================
-# Main Tabs
-# ============================================================
+if market_px is not None and not market_px.empty:
+    latest_px = market_px.iloc[-1]
+    px_rows = []
+    for a in cfg["assets"]:
+        meta = ETF_META.get(a, {"code": "", "name": a})
+        val = latest_px.get(a, float("nan"))
+        px_rows.append({
+            "代码": meta["code"],
+            "场内收盘": f"{val:.3f}" if pd.notna(val) else "—",
+        })
+    st.sidebar.dataframe(pd.DataFrame(px_rows), width="stretch", hide_index=True)
+    st.sidebar.caption("下单请用场内收盘，勿用累计净值")
+
 tab1, tab2, tab3, tab4 = st.tabs(
     ["📊 信号仪表盘", "📋 目标权重", "🏗️ 建仓清单", "🔄 调仓清单"]
 )
@@ -254,6 +297,7 @@ tab1, tab2, tab3, tab4 = st.tabs(
 # Tab 1: 信号仪表盘
 # ============================================================
 with tab1:
+    st.caption("信号与权重用累计净值（与回测一致）。顶部切换策略；左侧场内收盘用于下单。")
     triggered = []
     calm = []
     not_applicable = []
@@ -401,10 +445,17 @@ with tab2:
             "资产": meta["name"],
             "代码": meta["code"],
             "权重": f"{pct*100:.1f}%",
+            "场内收盘": (
+                f"{float(market_px.iloc[-1].get(a, float('nan'))):.3f}"
+                if market_px is not None and not market_px.empty
+                and a in market_px.columns and pd.notna(market_px.iloc[-1].get(a))
+                else "—"
+            ),
             "状态": " / ".join(status_parts) if status_parts else "—",
         })
 
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    st.caption("权重按累计净值计算（与回测一致）；场内收盘用于核对券商报价。")
 
     if any(signals.get(k, False) for k in ["nonferr_below_sma75", "gold_below_sma75", "sp500_below_sma75"]):
         st.info("趋势过滤触发 → 对应资产已清仓，权重转入城投债ETF (511220)")
@@ -414,6 +465,10 @@ with tab2:
 # ============================================================
 with tab3:
     st.subheader("从零建仓")
+    if px_date:
+        st.caption(f"场内收盘 {px_date}（不复权）。股数按此价 / 100 股取整，盘中成交可能略有差异。")
+    else:
+        st.error("没有场内收盘价，无法生成可下单的股数。请点侧边栏「拉取最新数据」。")
 
     amount = st.number_input(
         "投资总额（元）",
@@ -424,12 +479,13 @@ with tab3:
         key="build_amount_input",
     )
 
-    if amount > 0:
-        latest = prices.iloc[-1]
+    if amount > 0 and market_px is not None and not market_px.empty:
+        latest = market_px.iloc[-1]
         lot_size = 100
 
         rows = []
         total_used = 0
+        missing_px = []
         for a in cfg["assets"]:
             meta = ETF_META.get(a, {"code": "", "name": a})
             pct = w.get(a, 0)
@@ -438,6 +494,7 @@ with tab3:
             target_amount = pct * amount
             price = float(latest.get(a, np.nan))
             if np.isnan(price) or price <= 0:
+                missing_px.append(meta["code"])
                 continue
             shares = int(target_amount / price / lot_size) * lot_size
             actual = shares * price
@@ -447,7 +504,7 @@ with tab3:
                 "代码": meta["code"],
                 "权重": f"{pct*100:.1f}%",
                 "目标金额": f"¥{target_amount:,.0f}",
-                "现价": f"{price:.3f}",
+                "场内收盘": f"{price:.3f}",
                 "买入股数": shares,
                 "实际金额": f"¥{actual:,.0f}",
             })
@@ -467,6 +524,8 @@ with tab3:
 
             if any(a == "us_sp500" for a in cfg["assets"]) and w.get("us_sp500", 0) > 0:
                 st.info("标普500 QDII 经常限购，买不到用场外联接 050025 替代")
+            if missing_px:
+                st.warning(f"缺场内收盘、已跳过: {', '.join(missing_px)}")
         else:
             st.warning("无有效资产可建仓")
 
@@ -474,13 +533,29 @@ with tab3:
 # Tab 4: 调仓清单
 # ============================================================
 with tab4:
-    st.subheader("调仓对比")
+    st.subheader("旧仓 + 新钱")
+    if px_date:
+        st.caption(
+            f"填入当前持仓股数和本月新增资金。目标 = 权重 ×（旧仓市值 + 新钱），"
+            f"按场内收盘 {px_date} 计算买卖股数。"
+        )
+    else:
+        st.error("没有场内收盘价，无法计算调仓股数。请点侧边栏「拉取最新数据」。")
 
-    st.caption("输入当前持仓股数，自动计算买卖清单")
-
-    latest = prices.iloc[-1]
+    latest = market_px.iloc[-1] if market_px is not None and not market_px.empty else None
     lot_size = 100
 
+    new_cash = st.number_input(
+        "本月新增资金（元）",
+        min_value=0,
+        value=0,
+        step=1000,
+        format="%d",
+        key=f"new_cash_{strat_key}",
+        help="定投/转入的现金。与旧仓市值合计后，再按目标权重分配。",
+    )
+
+    st.markdown("**当前持仓股数**")
     holdings_shares = {}
     cols = st.columns(3)
     for i, a in enumerate(cfg["assets"]):
@@ -495,60 +570,91 @@ with tab4:
                 key=f"holdings_{strat_key}_{a}",
             )
 
-    total_value = sum(
-        holdings_shares.get(a, 0) * float(latest.get(a, 0)) for a in cfg["assets"]
-    )
-    if total_value > 0:
-        st.divider()
-        st.caption(f"持仓总市值: ¥{total_value:,.0f}")
-
-        trade_rows = []
-        any_trade = False
-        for a in cfg["assets"]:
-            meta = ETF_META.get(a, {"code": "", "name": a})
-            price = float(latest.get(a, 0))
-            shares = holdings_shares.get(a, 0)
-            current_amt = shares * price
-            target_amt = w.get(a, 0) * total_value
-            diff_amt = target_amt - current_amt
-            pct_diff = abs(diff_amt) / total_value if total_value > 0 else 0
-            diff_shares = int(diff_amt / price / lot_size) * lot_size if price > 0 else 0
-
-            if pct_diff < 0.005 or diff_shares == 0:
-                action = "不变"
-            elif diff_amt > 0:
-                action = f"买入 {diff_shares} 股"
-                any_trade = True
-            else:
-                action = f"卖出 {-diff_shares} 股"
-                any_trade = True
-
-            trade_rows.append({
-                "资产": meta["name"],
-                "代码": meta["code"],
-                "持仓股数": shares,
-                "市值 (¥)": f"{current_amt:,.0f}",
-                "目标 (¥)": f"{target_amt:,.0f}",
-                "差额 (¥)": f"{diff_amt:+,.0f}" if abs(diff_amt) >= 1 else "—",
-                "操作": action,
-            })
-
-        st.dataframe(pd.DataFrame(trade_rows), width="stretch", hide_index=True)
-
-        if not any_trade:
-            st.success("所有资产偏离 < 0.5%，无需调仓")
-
-        with st.expander("调仓规则说明"):
-            st.markdown("""
-            1. 每月最后一个交易日执行一次
-            2. 先卖后买 — 卖出资金 T+0 可用后再买入
-            3. nonferr / gold / SP500 跌破 SMA → 清仓转城投债
-            4. 偏离 < 0.5% 不用动，省手续费
-            5. 股数按 100 股取整，实际成交金额以市价为准
-            6. 标普500 QDII 限购时用场外联接 050025 替代
-            """)
+    if latest is None:
+        st.caption("有场内收盘价后才会生成调仓清单")
     else:
-        st.caption("输入持仓股数后自动生成调仓清单")
+        holdings_mv = sum(
+            holdings_shares.get(a, 0) * float(latest.get(a, 0) or 0)
+            for a in cfg["assets"]
+        )
+        total_value = holdings_mv + float(new_cash)
+        if total_value > 0:
+            st.divider()
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                st.metric("旧仓市值", f"¥{holdings_mv:,.0f}")
+            with m2:
+                st.metric("新增资金", f"¥{new_cash:,.0f}")
+            with m3:
+                st.metric("合计（再平衡基数）", f"¥{total_value:,.0f}")
+
+            trade_rows = []
+            any_trade = False
+            buy_cash = 0.0
+            sell_cash = 0.0
+            for a in cfg["assets"]:
+                meta = ETF_META.get(a, {"code": "", "name": a})
+                price = float(latest.get(a, 0) or 0)
+                shares = holdings_shares.get(a, 0)
+                current_amt = shares * price
+                target_amt = w.get(a, 0) * total_value
+                diff_amt = target_amt - current_amt
+                pct_diff = abs(diff_amt) / total_value if total_value > 0 else 0
+                diff_shares = int(diff_amt / price / lot_size) * lot_size if price > 0 else 0
+
+                if pct_diff < 0.005 or diff_shares == 0:
+                    action = "不变"
+                elif diff_amt > 0:
+                    action = f"买入 {diff_shares} 股"
+                    any_trade = True
+                    buy_cash += diff_shares * price
+                else:
+                    action = f"卖出 {-diff_shares} 股"
+                    any_trade = True
+                    sell_cash += (-diff_shares) * price
+
+                trade_rows.append({
+                    "资产": meta["name"],
+                    "代码": meta["code"],
+                    "场内收盘": f"{price:.3f}" if price > 0 else "—",
+                    "持仓股数": shares,
+                    "市值 (¥)": f"{current_amt:,.0f}",
+                    "目标 (¥)": f"{target_amt:,.0f}",
+                    "差额 (¥)": f"{diff_amt:+,.0f}" if abs(diff_amt) >= 1 else "—",
+                    "操作": action,
+                })
+
+            st.dataframe(pd.DataFrame(trade_rows), width="stretch", hide_index=True)
+
+            leftover = float(new_cash) + sell_cash - buy_cash
+            s1, s2, s3 = st.columns(3)
+            with s1:
+                st.metric("预计买入", f"¥{buy_cash:,.0f}")
+            with s2:
+                st.metric("预计卖出", f"¥{sell_cash:,.0f}")
+            with s3:
+                st.metric("剩余现金", f"¥{leftover:,.0f}",
+                          delta="放入货基/华宝添益(511990)")
+
+            if sell_cash > 0:
+                st.warning("有卖出：先卖后买，等卖出资金 T+0 可用再买。")
+            if not any_trade:
+                st.success("所有资产偏离 < 0.5%，无需调仓")
+            if any(a == "us_sp500" for a in cfg["assets"]) and w.get("us_sp500", 0) > 0:
+                st.info("标普500 QDII 限购时用场外联接 050025 替代")
+
+            with st.expander("调仓规则说明"):
+                st.markdown("""
+            1. 每月最后一个交易日执行一次
+            2. **旧仓 + 新钱**：目标金额 = 当前权重 ×（已有市值 + 新增资金）
+            3. 先卖后买 — 卖出资金 T+0 可用后再买入
+            4. 趋势过滤触发时，被清仓资产应卖掉，权重在城投债
+            5. 偏离 < 0.5% 或不满 100 股 不用动
+            6. 价格为场内收盘价；零头放 511990
+            7. 标普500 QDII 限购时用场外联接 050025 替代
+            """)
+        else:
+            st.caption("输入持仓股数和/或新增资金后生成买卖清单")
 
 # ============================================================
 # 底部：三策略对比

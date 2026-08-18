@@ -393,16 +393,22 @@ def display_trade_list(strat_key, target_w, holdings_dict, total_value):
         print(f"\n  [OK] 所有资产偏离 < 0.5%，无需调仓")
 
 
-def display_build_plan(strat_key, w, prices, total_amount):
-    """建仓买入清单。从零开始，计算各 ETF 买入金额和股数。"""
+def display_build_plan(strat_key, w, prices, total_amount, market_px=None):
+    """建仓买入清单。从零开始，用场内收盘价计算买入股数。"""
     cfg = STRATEGIES[strat_key]
-    latest = prices.iloc[-1]
+    if market_px is None or market_px.empty:
+        print("  [ERROR] 缺少场内收盘价，已拒绝用累计净值估算股数（会下错单）。")
+        print("  请先运行数据更新，或在面板点「拉取最新数据」。")
+        return
+    latest = market_px.iloc[-1]
+    px_date = market_px.dropna(how="all").index.max().date()
     lot_size = 100
 
     print(f"\n{LINE}")
     print(f"  建仓清单 --- {cfg['name']}    总投资: RMB {total_amount:,.0f}")
+    print(f"  场内收盘价日期: {px_date}（不复权，按 100 股取整）")
     print(LINE)
-    print(f"  {'资产':<22} {'代码':<8} {'权重':>6} {'目标金额':>12} {'现价':>8} {'买入股数':>8} {'预估金额':>12}")
+    print(f"  {'资产':<22} {'代码':<8} {'权重':>6} {'目标金额':>12} {'场内收盘':>8} {'买入股数':>8} {'预估金额':>12}")
     print("  " + "-" * 80)
 
     total_used = 0
@@ -414,6 +420,7 @@ def display_build_plan(strat_key, w, prices, total_amount):
         amount = pct * total_amount
         price = float(latest.get(a, np.nan))
         if np.isnan(price) or price <= 0:
+            print(f"  {meta['name']:<22} {meta['code']:<8}  [缺场内收盘价，跳过]")
             continue
         shares = int(amount / price / lot_size) * lot_size
         actual = shares * price
@@ -504,8 +511,12 @@ def _auto_fetch_if_stale(max_calendar_days=7):
             fetch_all(force=True)
         else:
             print(f"数据较新（最旧: {oldest_name}, {days_old} 天前），直接使用")
+            from .fetch import fetch_market_prices
+            fetch_market_prices(force=False)
     except Exception as e:
         print(f"检查数据状态失败: {e}，使用现有数据继续")
+        from .fetch import fetch_market_prices
+        fetch_market_prices(force=False)
 
 
 # ============================================================
@@ -543,7 +554,7 @@ def _print_trade_tips():
     print(f"{LINE}\n")
 
 
-def _single_strat_flow(strat_key, tier, prices, signals, build_amount):
+def _single_strat_flow(strat_key, tier, prices, signals, build_amount, market_px=None):
     """单策略交互：显示权重 → 选择调仓/建仓/只看。"""
     cfg = STRATEGIES[strat_key]
     missing = [a for a in cfg["assets"] if a not in prices.columns]
@@ -560,7 +571,7 @@ def _single_strat_flow(strat_key, tier, prices, signals, build_amount):
 
     # 有金额 → 直接建仓
     if build_amount:
-        display_build_plan(strat_key, w, prices, build_amount)
+        display_build_plan(strat_key, w, prices, build_amount, market_px=market_px)
         return
 
     choice = input(f"\n操作: [1] 调仓清单(默认)  [2] 建仓清单  [3] 只看权重\n选择 (回车=调仓): ").strip()
@@ -568,7 +579,7 @@ def _single_strat_flow(strat_key, tier, prices, signals, build_amount):
         amt = input("建仓总金额？(回车取消): ").strip()
         if amt:
             try:
-                display_build_plan(strat_key, w, prices, float(amt))
+                display_build_plan(strat_key, w, prices, float(amt), market_px=market_px)
             except ValueError:
                 pass
     elif choice == "3":
@@ -652,8 +663,14 @@ def main():
 
     print(f"加载行情数据...")
     prices = load_prices()
+    from .fetch import load_market_px_panel
+    market_px = load_market_px_panel()
     last_date = prices.index[-1].strftime("%Y-%m-%d")
-    print(f"最新数据: {last_date}  |  共 {len(prices)} 个交易日\n")
+    px_date = (
+        market_px.dropna(how="all").index.max().strftime("%Y-%m-%d")
+        if market_px is not None and not market_px.empty else "无"
+    )
+    print(f"净值截止: {last_date}  |  场内收盘: {px_date}  |  共 {len(prices)} 个交易日\n")
 
     signals = compute_signal_states(prices)
 
@@ -668,13 +685,13 @@ def main():
 
     # 指定策略 → 直接进策略流程
     if strat_key:
-        _single_strat_flow(strat_key, tier, prices, signals, build_amount)
+        _single_strat_flow(strat_key, tier, prices, signals, build_amount, market_px=market_px)
         return
 
     # 有金额无策略 → 默认 B-Con
     if build_amount:
         print("(默认使用 V3-B 保守增强策略)")
-        _single_strat_flow("B-Con", tier, prices, signals, build_amount)
+        _single_strat_flow("B-Con", tier, prices, signals, build_amount, market_px=market_px)
         return
 
     # 无参数 → 信号 + 策略概要 + 选策略
@@ -683,7 +700,7 @@ def main():
 
     pick = input(f"\n选择策略 ({'/'.join(STRATEGIES.keys())}，回车=退出): ").strip()
     if pick in STRATEGIES:
-        _single_strat_flow(pick, tier, prices, signals, None)
+        _single_strat_flow(pick, tier, prices, signals, None, market_px=market_px)
 
 
 if __name__ == "__main__":

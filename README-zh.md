@@ -71,14 +71,37 @@
 ## 快速开始
 
 ```bash
-pip install -r requirements.txt
-python main.py                         # 全量回测（自动增量更新数据 + 报告）
-# python main.py --force-fetch         # 强制重拉所有数据
-# python main.py --no-excel            # 跳过 Excel 报告
-# python main.py --no-markdown         # 跳过 Markdown 报告
-python -m allweather.rebalance         # CLI 再平衡
-# 或双击 streamlit_app/run.bat  打开 Web 面板（推荐）
+pip install -e ".[fetch]"
+pip install streamlit
+py main.py                             # 全量回测（自动增量更新数据 + 报告）
+# py main.py --force-fetch             # 强制重拉所有数据
+# py main.py --no-excel                # 跳过 Excel 报告
+# py main.py --no-markdown             # 跳过 Markdown 报告
+py -m allweather.rebalance             # CLI 再平衡
 ```
+
+### 再平衡面板（推荐）
+
+Windows 双击 `streamlit_app/run.bat`（脚本会优先调用 `py`，避免微软商店的 `python` 占位程序闪退）。或：
+
+```bash
+pip install streamlit
+py streamlit_app/run.py
+```
+
+浏览器打开 `http://localhost:8501`。**不要关黑色命令行窗口**，关了服务就停；退出用窗口里 `Ctrl+C`。
+
+| 步骤 | 说明 |
+|------|------|
+| 切策略 | 主页面顶部选 V3-B 保守增强 / 风险平价 / V3c，以及 100%/85%/70% RP |
+| 信号 / 权重 | 用累计净值计算，与回测同一口径 |
+| 场内收盘 | 左侧列表与建仓/调仓表，用于核对券商报价、计算股数（不是累计净值） |
+| 从零建仓 | 「建仓清单」只填**这笔新资金**（空仓首次买入） |
+| 旧仓 + 新钱 | 「调仓清单」填当前持仓股数 + 本月新增资金，按权重 ×（旧仓市值+新钱）给出买卖 |
+| 定投节奏 | 月末最后一个交易日操作；有卖出则先卖后买；零头放货基 511990 |
+| 刷新行情 | 侧栏「拉取最新数据」 |
+
+首次启动会拉场内收盘价（`data/*_px.csv`）。若提示找不到 Python：安装 3.10+ 并使用 `py`，或关闭「设置 → 应用 → 高级应用设置 → 应用执行别名」里的 `python.exe`。
 
 **输出文件**:
 

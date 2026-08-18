@@ -71,14 +71,33 @@ Based on Bridgewater's **four-quadrant macro exposure** framework, selecting fro
 ## Getting Started
 
 ```bash
-pip install -r requirements.txt
-python main.py                         # Full backtest (auto incremental data + report)
-# python main.py --force-fetch         # Force re-fetch all data
-# python main.py --no-excel            # Skip Excel report
-# python main.py --no-markdown         # Skip Markdown report
-# 双击 streamlit_app/run.bat  打开 Web 再平衡面板
-python -m allweather.rebalance         # CLI rebalancing (legacy)
+pip install -e ".[fetch]"
+pip install streamlit
+py main.py                             # Full backtest (auto incremental data + report)
+# py main.py --force-fetch             # Force re-fetch all data
+# py main.py --no-excel                # Skip Excel report
+# py main.py --no-markdown             # Skip Markdown report
+py -m allweather.rebalance             # CLI rebalancing (legacy)
 ```
+
+### Live rebalance panel (recommended)
+
+On Windows, double-click `streamlit_app/run.bat` (uses the `py` launcher so the Microsoft Store `python` stub does not flash-close). Or:
+
+```bash
+pip install streamlit
+py streamlit_app/run.py
+```
+
+The browser opens `http://localhost:8501`. Keep the console window open while the server runs; stop with `Ctrl+C`.
+
+- Strategy and cash tier are at the **top of the main page** (not only in the sidebar).
+- Signals/weights use cumulative NAV (same as the backtest). Share counts use unadjusted on-exchange close.
+- **Build list**: new money only (first purchase).
+- **Rebalance list**: current shares + this month's new cash. Target = weight × (holdings MV + new cash).
+- Rebalance on the last trading day of the month. Park leftover cash in 511990.
+
+If `python` is not found, install Python 3.10+ and use `py`, or disable the `python.exe` App Execution Alias in Windows Settings.
 
 **Output files**:
 
