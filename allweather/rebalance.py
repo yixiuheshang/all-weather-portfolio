@@ -17,7 +17,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from .config import (
-    ROOT, DATA_DIR, ASSETS, ETF_META, PORTFOLIO_NAMES, STRATEGY_PARAMS,
+    DATA_DIR, ASSETS, ETF_META, PORTFOLIO_NAMES, STRATEGY_PARAMS,
     RISK_PARITY_WINDOW, RISK_PARITY_MAX_WEIGHT, RISK_PARITY_MIN_WEIGHT,
     GOLD_DIP_THRESHOLD, GOLD_DIP_BOOST,
     HS300_DIP_THRESHOLD, HS300_DIP_BOOST, HS300_DIP_SMA,
@@ -28,29 +28,6 @@ from .config import (
     V3C_ASSETS,
 )
 from .risk import inverse_vol_weights, hierarchical_rp_weights, erc_weights
-
-# === 持久化状态（防止重复抄底 boost，与 backtest 引擎行为一致） ===
-REBALANCE_STATE_PATH = ROOT / "data" / "rebalance_state.json"
-
-def _load_rebalance_state():
-    """加载 rebalance 持久化状态。"""
-    try:
-        if REBALANCE_STATE_PATH.exists():
-            import json
-            with open(REBALANCE_STATE_PATH) as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return {}
-
-def _save_rebalance_state(state):
-    """保存 rebalance 持久化状态。"""
-    try:
-        import json
-        with open(REBALANCE_STATE_PATH, "w") as f:
-            json.dump(state, f, indent=2)
-    except Exception as e:
-        print(f"  [WARN] 保存 rebalance 状态失败: {e}")
 
 _ASSET_MAP = {
     "rp": (V3B_RP_ASSETS, {"buckets": V3B_RP_BUCKETS}),
@@ -182,16 +159,11 @@ def compute_target_weights(strat_key, prices, cash_ratio=0.0):
 def apply_signal_overrides(strat_key, w, signals, prices=None):
     """按策略应用各风控措施到目标权重。
 
-    Args:
-        strat_key: 策略 key
-        w: 目标权重 Series
-        signals: 信号状态 dict
-        prices: 价格 DataFrame（可选，用于 boost 状态判断）
+    趋势过滤和抄底都从**当次基础权重**叠加，每次调用结果相同（幂等）。
+    不能用「本月已 boost」跳过：面板每次输入都会重算，跳过会让目标权重
+    掉回未抄底，调仓清单与信号仪表盘不一致。
     """
     w = w.copy()
-    state = _load_rebalance_state()
-    strat_state = state.setdefault(strat_key, {"gold_boost_month": None, "hs300_boost_month": None})
-    this_month = prices.index[-1].strftime("%Y-%m") if prices is not None else None
 
     # nonferr trend filter (all strategies)
     if signals.get("nonferr_below_sma75", False) and "nonferr" in w.index and "credit" in w.index:
@@ -212,39 +184,29 @@ def apply_signal_overrides(strat_key, w, signals, prices=None):
             w["credit"] += w["us_sp500"]
             w["us_sp500"] = 0.0
 
-    # Gold dip — 防止重复 boost（同一个月内不重复触发）
-    gold_dip_eligible = signals.get("gold_dip_active", False)
-    gold_already_boosted = strat_state.get("gold_boost_month") == this_month
-    if gold_dip_eligible and not gold_already_boosted and "gold" in w.index and "credit" in w.index:
+    # Gold dip: 基础权重上加 GOLD_DIP_BOOST 倍（再受 B-Con 20% 上限）
+    if signals.get("gold_dip_active", False) and "gold" in w.index and "credit" in w.index:
         if w["gold"] > 0:
             boost = w["gold"] * GOLD_DIP_BOOST
             if w["credit"] >= boost:
                 w["gold"] += boost
                 w["credit"] -= boost
-                strat_state["gold_boost_month"] = this_month
                 if strat_key == "B-Con":
                     cap = 0.20
                     if w["gold"] > cap:
                         w["credit"] += w["gold"] - cap
                         w["gold"] = cap
-    elif gold_already_boosted:
-        pass  # 本月已 boost，跳过
 
-    # HS300 AND dip — 防止重复 boost
-    hs300_eligible = signals.get("hs300_dip_ready", False)
-    hs300_already_boosted = strat_state.get("hs300_boost_month") == this_month
-    if hs300_eligible and not hs300_already_boosted and "hs300" in w.index and "credit" in w.index:
+    # HS300 AND dip
+    if signals.get("hs300_dip_ready", False) and "hs300" in w.index and "credit" in w.index:
         if w["hs300"] > 0:
             boost = w["hs300"] * (HS300_DIP_BOOST - 1)
             if w["credit"] >= boost:
                 w["hs300"] += boost
                 w["credit"] -= boost
-                strat_state["hs300_boost_month"] = this_month
-    elif hs300_already_boosted:
-        pass  # 本月已 boost，跳过
 
-    _save_rebalance_state(state)
-    return w / w.sum()  # renormalize to 1.0
+    total = w.sum()
+    return w / total if total > 0 else w
 
 
 # ============================================================

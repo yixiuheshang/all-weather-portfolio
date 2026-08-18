@@ -314,6 +314,7 @@ with tab1:
 
     if triggered:
         st.subheader("⚠️ 已触发信号")
+        st.caption("这些信号已经写进「目标权重」。调仓清单比较的是目标与你的持仓差额，不是在目标之外再下一笔。")
         for sa in triggered:
             with st.container(border=True):
                 cols = st.columns([2, 1, 1])
@@ -426,10 +427,12 @@ with tab2:
             status_parts.append("趋势过滤→已清仓")
         if a == "us_sp500" and signals.get("sp500_below_sma75") and pct == 0:
             status_parts.append("趋势过滤→已清仓")
-        if a == "gold" and signals.get("gold_dip_active") and pct > 0:
-            status_parts.append("抄底×2.5")
-        if a == "hs300" and signals.get("hs300_dip_ready") and pct > 0:
-            status_parts.append("AND抄底×1.8")
+        if a == "gold" and w.get("gold", 0) > w0.get("gold", 0) + 1e-6:
+            status_parts.append("抄底×2.5（已计入权重）")
+        if a == "hs300" and w.get("hs300", 0) > w0.get("hs300", 0) + 1e-6:
+            status_parts.append("AND抄底×1.8（已计入权重）")
+        if a == "credit" and w.get("credit", 0) + 1e-6 < w0.get("credit", 0):
+            status_parts.append("为抄底筹资")
         if a == "credit":
             incoming = []
             if signals.get("nonferr_below_sma75"):
