@@ -316,14 +316,19 @@ def fetch_one_market_px(code: str) -> pd.DataFrame:
     raise last_err
 
 
-def fetch_market_prices(force: bool = False):
+def fetch_market_prices(force: bool = False, on_progress=None):
     """拉取 ETF 不复权场内收盘价，写入 data/{asset}_px.csv。
 
     与累计净值 CSV 分开：净值用于策略权重/信号，场内收盘价用于下单股数。
+    on_progress(done, total, message) 可选，供面板进度条使用。
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     ok, errors, up_to_date = {}, [], []
-    for asset, meta in ETF_META.items():
+    items = list(ETF_META.items())
+    n = len(items)
+    for i, (asset, meta) in enumerate(items, 1):
+        if on_progress:
+            on_progress(i - 1, n, f"{meta['name']} ({meta['code']})")
         code = meta["code"]
         path = DATA_DIR / f"{asset}_px.csv"
         print(f"  >> {asset}_px ({code}) 场内收盘", flush=True)
@@ -348,6 +353,8 @@ def fetch_market_prices(force: bool = False):
         except Exception as e:
             errors.append(f"{asset}_px: {str(e)[:200]}")
             print(f"    FAIL  {e}")
+    if on_progress:
+        on_progress(n, n, "场内收盘完成")
     return ok, errors, up_to_date
 
 
@@ -364,7 +371,8 @@ def load_market_px_panel() -> pd.DataFrame:
     return pd.DataFrame(dfs).sort_index().ffill()
 
 
-def fetch_all(force: bool = False, start: str = DEFAULT_START, end: str = DEFAULT_END):
+def fetch_all(force: bool = False, start: str = DEFAULT_START, end: str = DEFAULT_END,
+              on_progress=None):
     """拉取所有目标资产。支持增量更新 —— 已有文件只补充缺失日期。
 
     Args:
@@ -377,8 +385,12 @@ def fetch_all(force: bool = False, start: str = DEFAULT_START, end: str = DEFAUL
     print(f"[fetch] 拉取区间: {start} ~ {end}")
 
     ok, errors, up_to_date = {}, [], []
+    target_items = list(TARGETS.items())
+    n_nav = len(target_items)
 
-    for name, (kind, sym) in TARGETS.items():
+    for i, (name, (kind, sym)) in enumerate(target_items, 1):
+        if on_progress:
+            on_progress(i - 1, n_nav + len(ETF_META), f"净值 {name}")
         path = DATA_DIR / f"{name}.csv"
         if path.exists() and not force:
             # 增量模式 —— 跳过已有日期，只拉新数据
@@ -435,7 +447,13 @@ def fetch_all(force: bool = False, start: str = DEFAULT_START, end: str = DEFAUL
     else:
         print(f"    WARN  中债收益率曲线拉取失败，将使用久期放大回退方案合成 30Y")
 
-    px_ok, px_err, px_fresh = fetch_market_prices(force=force)
+    px_ok, px_err, px_fresh = fetch_market_prices(
+        force=force,
+        on_progress=(
+            (lambda d, t, m: on_progress(n_nav + d, n_nav + t, m))
+            if on_progress else None
+        ),
+    )
     ok.update(px_ok)
     errors.extend(px_err)
     up_to_date.extend(px_fresh)

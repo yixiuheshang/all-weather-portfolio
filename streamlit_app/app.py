@@ -4,13 +4,31 @@
 """
 import sys
 from pathlib import Path
+from datetime import date
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import streamlit as st
+
+st.set_page_config(
+    page_title="全天候再平衡",
+    page_icon="🌤️",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+if "auto_fetch_done" not in st.session_state:
+    st.session_state.auto_fetch_done = False
+
+_LOADING = not st.session_state.auto_fetch_done
+if _LOADING:
+    st.title("🌤️ 全天候再平衡")
+    st.caption("正在准备行情与信号，请稍候，不要关闭窗口。")
+    _boot_bar = st.progress(0, text="加载模块…")
+    _boot_step = st.empty()
+
 import pandas as pd
-from datetime import date
 import numpy as np
 
 from allweather.rebalance import (
@@ -24,18 +42,12 @@ from allweather.fetch import load_market_px_panel, fetch_market_prices
 from allweather.config import (
     DATA_DIR,
     GOLD_DIP_THRESHOLD,
+    GOLD_DIP_BOOST,
     HS300_DIP_THRESHOLD,
     HS300_DIP_SMA,
     HS300_PB_ENTRY,
     HS300_PE_EXIT,
     SP500_TREND_WINDOW,
-)
-
-st.set_page_config(
-    page_title="全天候再平衡",
-    page_icon="🌤️",
-    layout="wide",
-    initial_sidebar_state="expanded",
 )
 
 st.markdown("""<style>
@@ -161,18 +173,31 @@ def _check_data_staleness():
 st.sidebar.title("🌤️ 全天候再平衡")
 st.sidebar.caption("策略和现金档位在主页面顶部切换。")
 
-# 自动拉取：净值超过 1 个交易日则增量更新；场内收盘价每次会话都刷新（当日 15:00 后即可用）
+# 自动拉取：净值超过 1 个交易日则增量更新；场内收盘价每次会话都刷新
 staleness_days, staleness_asset = _check_data_staleness()
-if "auto_fetch_done" not in st.session_state:
-    st.session_state.auto_fetch_done = False
 
-if not st.session_state.auto_fetch_done:
+if _LOADING:
+    def _boot_progress(done, total, msg):
+        frac = (done / total) if total else 1.0
+        _boot_bar.progress(min(frac, 1.0), text=msg)
+        _boot_step.caption(msg)
+
+    _boot_progress(0, 8, "检查本地数据…")
     from allweather.fetch import fetch_all
     today_str = date.today().strftime("%Y%m%d")
     if staleness_days is not None and staleness_days > 1:
-        fetch_all(force=False, end=today_str)
+        _boot_bar.progress(0.08, text="净值超过 1 个交易日，增量更新…")
+        fetch_all(
+            force=False,
+            end=today_str,
+            on_progress=lambda d, t, m: _boot_progress(d, t, f"更新行情：{m}"),
+        )
     else:
-        fetch_market_prices(force=False)
+        fetch_market_prices(
+            force=False,
+            on_progress=lambda d, t, m: _boot_progress(d, t, f"场内收盘：{m}"),
+        )
+    _boot_bar.progress(1.0, text="启动完成")
     st.session_state.auto_fetch_done = True
     st.cache_data.clear()
     st.rerun()
@@ -187,10 +212,14 @@ else:
 
 if st.sidebar.button("🔄 拉取最新数据"):
     with st.sidebar:
-        with st.spinner("正在拉取..."):
-            from allweather.fetch import fetch_all
-            today_str = date.today().strftime("%Y%m%d")
-            fetch_all(force=False, end=today_str)
+        bar = st.progress(0, text="开始拉取…")
+        def _sb_progress(done, total, msg):
+            frac = (done / total) if total else 1.0
+            bar.progress(min(frac, 1.0), text=msg)
+        from allweather.fetch import fetch_all
+        today_str = date.today().strftime("%Y%m%d")
+        fetch_all(force=False, end=today_str, on_progress=_sb_progress)
+        bar.progress(1.0, text="完成")
     st.session_state.auto_fetch_done = True
     st.cache_data.clear()
     st.rerun()
@@ -314,7 +343,10 @@ with tab1:
 
     if triggered:
         st.subheader("⚠️ 已触发信号")
-        st.caption("这些信号已经写进「目标权重」。调仓清单比较的是目标与你的持仓差额，不是在目标之外再下一笔。")
+        st.caption(
+            "这些信号已经写进「目标权重」（黄金抄底 = 权重变为 2.5 倍，从城投债转出）。"
+            "请买表里的百分比，不要再乘一遍。"
+        )
         for sa in triggered:
             with st.container(border=True):
                 cols = st.columns([2, 1, 1])
@@ -427,12 +459,25 @@ with tab2:
             status_parts.append("趋势过滤→已清仓")
         if a == "us_sp500" and signals.get("sp500_below_sma75") and pct == 0:
             status_parts.append("趋势过滤→已清仓")
-        if a == "gold" and w.get("gold", 0) > w0.get("gold", 0) + 1e-6:
-            status_parts.append("抄底×2.5（已计入权重）")
-        if a == "hs300" and w.get("hs300", 0) > w0.get("hs300", 0) + 1e-6:
-            status_parts.append("AND抄底×1.8（已计入权重）")
-        if a == "credit" and w.get("credit", 0) + 1e-6 < w0.get("credit", 0):
-            status_parts.append("为抄底筹资")
+        pct0 = float(w0.get(a, 0))
+        if a == "gold" and signals.get("gold_dip_active") and pct > 0:
+            if pct > pct0 + 1e-9:
+                status_parts.append(f"抄底×2.5（{pct0*100:.1f}%→{pct*100:.1f}%）")
+            else:
+                status_parts.append("抄底触发但城投不足，未加仓")
+        if a == "hs300" and signals.get("hs300_dip_ready") and pct > 0:
+            if pct > pct0 + 1e-9:
+                status_parts.append(f"AND抄底×1.8（{pct0*100:.1f}%→{pct*100:.1f}%）")
+            else:
+                status_parts.append("AND抄底触发但城投不足，未加仓")
+        if a == "credit" and (
+            (signals.get("gold_dip_active") and w.get("gold", 0) > 0)
+            or signals.get("hs300_dip_ready")
+        ):
+            if pct + 1e-9 < pct0:
+                status_parts.append(f"为抄底筹资（{pct0*100:.1f}%→{pct*100:.1f}%）")
+            else:
+                status_parts.append("为抄底筹资")
         if a == "credit":
             incoming = []
             if signals.get("nonferr_below_sma75"):
@@ -457,8 +502,25 @@ with tab2:
             "状态": " / ".join(status_parts) if status_parts else "—",
         })
 
+    if cash_ratio > 1e-9:
+        rows.append({
+            "资产": "现金 / 货基",
+            "代码": "511990",
+            "权重": f"{cash_ratio*100:.1f}%",
+            "场内收盘": "—",
+            "状态": f"{tier}% RP 未投资部分",
+        })
+
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-    st.caption("权重按累计净值计算（与回测一致）；场内收盘用于核对券商报价。")
+    st.caption(
+        "百分比相对投资总额（含现金档）。信号加仓已写进上表，不要按仪表盘再乘一遍。"
+        "权重用累计净值；场内收盘只用于核对券商报价。"
+    )
+    if signals.get("gold_dip_active") and float(w.get("gold", 0)) > float(w0.get("gold", 0)) + 1e-9:
+        st.info(
+            f"黄金抄底已计入：目标权重变为基础的 {GOLD_DIP_BOOST:.1f} 倍，"
+            f"多出来的部分从城投债 ETF 转出。"
+        )
 
     if any(signals.get(k, False) for k in ["nonferr_below_sma75", "gold_below_sma75", "sp500_below_sma75"]):
         st.info("趋势过滤触发 → 对应资产已清仓，权重转入城投债ETF (511220)")

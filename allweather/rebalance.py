@@ -184,29 +184,31 @@ def apply_signal_overrides(strat_key, w, signals, prices=None):
             w["credit"] += w["us_sp500"]
             w["us_sp500"] = 0.0
 
-    # Gold dip: 基础权重上加 GOLD_DIP_BOOST 倍（再受 B-Con 20% 上限）
+    # Gold dip: 黄金权重变为 GOLD_DIP_BOOST 倍（从城投债筹资）。
+    # 城投不够则能转多少转多少，禁止静默整笔跳过（否则仪表盘亮了权重不变）。
     if signals.get("gold_dip_active", False) and "gold" in w.index and "credit" in w.index:
         if w["gold"] > 0:
-            boost = w["gold"] * GOLD_DIP_BOOST
-            if w["credit"] >= boost:
-                w["gold"] += boost
-                w["credit"] -= boost
+            want = w["gold"] * (GOLD_DIP_BOOST - 1)
+            take = min(float(want), float(w["credit"]))
+            if take > 0:
+                w["gold"] += take
+                w["credit"] -= take
                 if strat_key == "B-Con":
                     cap = 0.20
                     if w["gold"] > cap:
                         w["credit"] += w["gold"] - cap
                         w["gold"] = cap
 
-    # HS300 AND dip
+    # HS300 AND dip: 变为 HS300_DIP_BOOST 倍
     if signals.get("hs300_dip_ready", False) and "hs300" in w.index and "credit" in w.index:
         if w["hs300"] > 0:
-            boost = w["hs300"] * (HS300_DIP_BOOST - 1)
-            if w["credit"] >= boost:
-                w["hs300"] += boost
-                w["credit"] -= boost
+            want = w["hs300"] * (HS300_DIP_BOOST - 1)
+            take = min(float(want), float(w["credit"]))
+            if take > 0:
+                w["hs300"] += take
+                w["credit"] -= take
 
-    total = w.sum()
-    return w / total if total > 0 else w
+    return w
 
 
 # ============================================================
