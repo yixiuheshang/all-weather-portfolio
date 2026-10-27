@@ -18,16 +18,20 @@ import numpy as np
 from pathlib import Path
 from .config import (
     DATA_DIR, ASSETS, ETF_META, PORTFOLIO_NAMES, STRATEGY_PARAMS,
+    STRATEGY_RULES,
     RISK_PARITY_WINDOW, RISK_PARITY_MAX_WEIGHT, RISK_PARITY_MIN_WEIGHT,
     GOLD_DIP_THRESHOLD, GOLD_DIP_BOOST,
     HS300_DIP_THRESHOLD, HS300_DIP_BOOST, HS300_DIP_SMA,
     HS300_PB_ENTRY, HS300_PE_EXIT, HS300_DIP_EXIT_RECOVERY,
-    SP500_TREND_WINDOW,
+    SP500_TREND_WINDOW, HS300_TREND_WINDOW,
     V3B_RP_ASSETS, V3B_RP_BUCKETS,
     V3B_CON_ASSETS, V3B_CON_BUCKETS,
     V3C_ASSETS,
 )
-from .risk import inverse_vol_weights, hierarchical_rp_weights, erc_weights
+from .risk import (
+    inverse_vol_weights, hierarchical_rp_weights, erc_weights,
+    hs300_dip_check, _precompute_percentile,
+)
 
 _ASSET_MAP = {
     "rp": (V3B_RP_ASSETS, {"buckets": V3B_RP_BUCKETS}),
@@ -72,67 +76,142 @@ def _drawdown(prices, asset, lookback=252):
     return s.iloc[-1] / peak - 1
 
 
-def compute_signal_states(prices):
-    """返回当前所有风控信号状态。"""
-    rets = prices.pct_change().dropna()
+# ============================================================
+# 规则映射（与 config.STRATEGY_RULES / 回测引擎一致）
+# ============================================================
+
+_RULES_BY_STRAT = {"B-RP": "rp", "B-Con": "con", "V3c": "v3c"}
+
+
+def _strategy_rules(strat_key):
+    """取策略风控规则（config.STRATEGY_RULES 的别名）。"""
+    return STRATEGY_RULES[_RULES_BY_STRAT[strat_key]]
+
+
+def _eq_signal_key(asset, window):
+    """权益趋势信号名（与 SIGNAL_ACTIONS 对齐）。"""
+    alias = {"us_sp500": "sp500", "hs300": "hs300"}
+    return f"{alias.get(asset, asset)}_below_sma{window}"
+
+
+def replay_hs300_dip_state(prices, pb_data=None, pe_data=None):
+    """按月末重放 HS300 AND 抄底状态机，返回截至最近月末的状态。
+
+    直接复用 risk.hs300_dip_check（回测引擎同一函数），保证口径一致：
+    - 峰值为全程累计高点（backtest 用累计 peak，非滚动窗口）
+    - PB/PE 分位为扩展分位（risk._precompute_percentile）
+    - 入场月 ×1.8；持有期间维持状态但不再重复加仓
+    - 退出 = 回撤收窄至 -15% 以内 且 PE 分位 > 70 **同时满足**
+    """
+    if pb_data is None:
+        pb_data = load_hs300_pb()
+    if pe_data is None:
+        pe_data = load_hs300_pe()
+    pb_pct = _precompute_percentile(pb_data)
+    pe_pct = _precompute_percentile(pe_data)
+
+    px = prices["hs300"]
+    sma = px.rolling(HS300_DIP_SMA, min_periods=1).mean().shift(1)
+    peak_series = px.cummax()  # 回测逐日更新 peak，等价于累计最大值
+    idx = prices.index
+
+    # 月末序列（与回测 REBAL_MODE="month_end" 同一判定）
+    month_end_pos = [
+        i for i in range(len(idx))
+        if i + 1 >= len(idx) or idx[i + 1].month != idx[i].month
+    ]
+
+    boosted = False
+    last_entry = False
+    last_exit = False
+    for i in month_end_pos:
+        if i <= HS300_DIP_SMA:
+            continue
+        prev = boosted
+        boosted, _boost = hs300_dip_check(
+            pb_data, pe_data, float(peak_series.iloc[i]), prev,
+            HS300_DIP_THRESHOLD, HS300_DIP_EXIT_RECOVERY,
+            HS300_PB_ENTRY, HS300_PE_EXIT, HS300_DIP_BOOST,
+            pb_pct_series=pb_pct, pe_pct_series=pe_pct,
+            hs300_sma_val=float(sma.iloc[i]),
+            hs300_price_val=float(px.iloc[i]),
+            date=idx[i],
+        )
+        last_entry = boosted and not prev
+        last_exit = prev and not boosted
+
+    return {
+        "active": boosted,
+        "entry": last_entry,
+        "exit": last_exit,
+    }
+
+
+def compute_signal_states(prices, hs300_pb=None, hs300_pe=None):
+    """返回当前所有风控信号状态（与回测引擎同口径）。
+
+    - 趋势信号为「当日快照」：当日在月末执行时即为调仓判定；
+      月中查看仅为预警。
+    - HS300 抄底是状态机：状态取自历史月末回放
+      （replay_hs300_dip_state），与回测逐月演进一致。
+    - gold_dip_active 仅作信息展示——该规则已在回测中弃用
+      （PROJECT_HISTORY.md），不进入权重（apply_signal_overrides）。
+    """
     latest = prices.index[-1]
     d = latest
 
     signals = {}
 
-    # --- SMA trend filters ---
+    # --- SMA trend filters（窗口取自 STRATEGY_RULES）---
     signals["nonferr_below_sma75"] = _sma_filter(prices, "nonferr", 75)
     signals["gold_below_sma75"] = _sma_filter(prices, "gold", 75)
+    signals["wti_below_sma75"] = _sma_filter(prices, "wti", 75)
     signals["sp500_below_sma75"] = _sma_filter(prices, "us_sp500", SP500_TREND_WINDOW)
+    signals["hs300_below_sma30"] = _sma_filter(prices, "hs300", HS300_TREND_WINDOW)
 
-    # --- Gold dip ---
-    gold_dd = _drawdown(prices, "gold", 252)
-    signals["gold_dd_pct"] = gold_dd
-    signals["gold_dip_active"] = gold_dd <= -GOLD_DIP_THRESHOLD
+    # --- Gold 回撤（信息展示；全程峰值口径，与回测 signal log 一致）---
+    gold_peak = prices["gold"].max()
+    signals["gold_dd_pct"] = prices["gold"].iloc[-1] / gold_peak - 1
+    signals["gold_dip_active"] = signals["gold_dd_pct"] <= -GOLD_DIP_THRESHOLD
 
-    # --- HS300 dip ---
-    hs300_dd = _drawdown(prices, "hs300", 756)
-    signals["hs300_dd_pct"] = hs300_dd
+    # --- HS300 回撤（全程峰值口径，与回测一致，非 756 窗口）---
+    hs300_peak = prices["hs300"].max()
+    signals["hs300_dd_pct"] = prices["hs300"].iloc[-1] / hs300_peak - 1
 
     # HS300 SMA check (> SMA for entry, 与 backtest 引擎一致用 shift(1))
     hs300_sma120 = prices["hs300"].rolling(HS300_DIP_SMA).mean().shift(1).iloc[-1]
     signals["hs300_above_sma120"] = pd.notna(hs300_sma120) and prices["hs300"].iloc[-1] > hs300_sma120
 
-    # HS300 PB/PE percentile
-    try:
-        pb_data = load_hs300_pb()
-        pe_data = load_hs300_pe()
-        if pb_data is not None and len(pb_data[pb_data.index <= d]) >= 252:
-            pb_to = pb_data[pb_data.index <= d]
-            pb_val = pb_to.iloc[-1]
-            pb_pct = (pb_to < pb_val).sum() / len(pb_to) * 100
-            signals["pb_pctile"] = float(pb_pct)
-            signals["pb_entry_ok"] = pb_pct < HS300_PB_ENTRY
-        else:
-            signals["pb_pctile"] = None
-            signals["pb_entry_ok"] = False
+    # HS300 PB/PE percentile（扩展分位，与回测 _precompute_percentile 同口径）
+    pb_data = hs300_pb if hs300_pb is not None else load_hs300_pb()
+    pe_data = hs300_pe if hs300_pe is not None else load_hs300_pe()
+    pb_pct_series = _precompute_percentile(pb_data)
+    pe_pct_series = _precompute_percentile(pe_data)
 
-        if pe_data is not None and len(pe_data[pe_data.index <= d]) >= 252:
-            pe_to = pe_data[pe_data.index <= d]
-            pe_val = pe_to.iloc[-1]
-            pe_pct = (pe_to < pe_val).sum() / len(pe_to) * 100
-            signals["pe_pctile"] = float(pe_pct)
-            signals["pe_exit_ok"] = pe_pct < HS300_PE_EXIT
-        else:
-            signals["pe_pctile"] = None
-            signals["pe_exit_ok"] = False
-    except (FileNotFoundError, OSError):
-        signals["pb_pctile"] = None
-        signals["pe_pctile"] = None
-        signals["pb_entry_ok"] = False
-        signals["pe_exit_ok"] = False
+    def _pct_at(series, pct_series, date):
+        if series is None or len(series) < 252:
+            return None
+        to_date = series[series.index <= date]
+        if len(to_date) < 252:
+            return None
+        curr = to_date.iloc[-1]
+        if pct_series is not None and date in pct_series.index and pd.notna(pct_series.loc[date]):
+            return float(pct_series.loc[date])
+        return float((to_date < curr).sum() / len(to_date) * 100)
 
-    # HS300 AND condition
+    signals["pb_pctile"] = _pct_at(pb_data, pb_pct_series, d)
+    signals["pe_pctile"] = _pct_at(pe_data, pe_pct_series, d)
+    signals["pb_entry_ok"] = signals["pb_pctile"] is not None and signals["pb_pctile"] < HS300_PB_ENTRY
+    signals["pe_exit_ok"] = signals["pe_pctile"] is not None and signals["pe_pctile"] < HS300_PE_EXIT
+
+    # --- HS300 AND 抄底状态机（历史月末回放）---
+    state = replay_hs300_dip_state(prices, pb_data=pb_data, pe_data=pe_data)
+    signals["hs300_dip_active"] = state["active"]      # 持有中（不再重复加仓）
+    signals["hs300_dip_entry"] = state["entry"]        # 本月入场 → 权重 ×1.8
+    signals["hs300_dip_exit"] = state["exit"]          # 本月退出 → 恢复基础权重
+    # 当日快照三条件（信息展示；实际入场时点以回放状态为准）
     dd_ok = signals["hs300_dd_pct"] <= -HS300_DIP_THRESHOLD
-    pb_ok = signals.get("pb_entry_ok", False)
-    sma_ok = signals.get("hs300_above_sma120", False)
-    signals["hs300_dip_ready"] = dd_ok and pb_ok and sma_ok
-    signals["hs300_dip_exit"] = signals.get("pe_exit_ok", True) is False
+    signals["hs300_dip_ready"] = dd_ok and signals["pb_entry_ok"] and signals["hs300_above_sma120"]
 
     return signals
 
@@ -142,9 +221,18 @@ def compute_signal_states(prices):
 # ============================================================
 
 def compute_target_weights(strat_key, prices, cash_ratio=0.0):
+    """计算基础目标权重（×(1-cash_ratio)），口径与回测引擎对齐。
+
+    - 权重窗口以「前一交易日」结尾（backtest 用 rets.iloc[i-window:i]，
+      不含调仓当日收益），因此这里 drop 掉最后一个交易日的收益。
+    - B-RP 应用目标波动率（risk 目标 9%，60d 协方差），与
+      backtest._apply_target_vol 相同：先缩放基础权重，再乘现金系数。
+    """
     cfg = STRATEGIES[strat_key]
+    rules = _strategy_rules(strat_key)
     rets_all = prices.pct_change().dropna()
-    rets = rets_all[cfg["assets"]].dropna()
+    # 与回测窗口对齐：排除最后一天的收益（回测窗口止于前一日）
+    rets = rets_all[cfg["assets"]].dropna().iloc[:-1]
 
     if cfg["method"] == "inverse_vol":
         w = inverse_vol_weights(rets, cfg["window"], cfg["max_w"], cfg["min_w"])
@@ -153,60 +241,65 @@ def compute_target_weights(strat_key, prices, cash_ratio=0.0):
     else:
         w = hierarchical_rp_weights(rets, cfg["buckets"], cfg["window"],
                                      cfg["max_w"], cfg["min_w"])
+
+    # 目标波动率缩放（仅 B-RP），与 backtest._apply_target_vol 一致
+    target_vol = rules.get("target_vol")
+    if target_vol is not None:
+        vol_window = rules.get("vol_target_window", 60)
+        if len(rets) >= vol_window:
+            cov = rets.tail(vol_window).cov().values * 252
+            w_arr = w.to_numpy()
+            port_vol = float(np.sqrt(max(w_arr @ cov @ w_arr, 1e-10)))
+            if port_vol > target_vol:
+                w = w * (target_vol / port_vol)
+
     return w * (1 - cash_ratio)
 
 
 def apply_signal_overrides(strat_key, w, signals, prices=None):
-    """按策略应用各风控措施到目标权重。
+    """按权威回测规则（config.STRATEGY_RULES）应用趋势过滤与抄底。
 
-    趋势过滤和抄底都从**当次基础权重**叠加，每次调用结果相同（幂等）。
-    不能用「本月已 boost」跳过：面板每次输入都会重算，跳过会让目标权重
-    掉回未抄底，调仓清单与信号仪表盘不一致。
+    与 backtest._apply_trend_dip 逐条对齐：
+    - 顺序：nonferr → equity → gold → WTI → HS300（与回测一致，
+      该顺序决定 HS300 抄底时 credit 余额判定）；
+    - 趋势清仓整笔转入 credit；
+    - HS300 抄底仅入场月 ×1.8，credit 不足时整笔不加
+      （回测行为，不做部分加仓）；持有月维持基础权重、不重复加仓；
+    - gold dip（黄金回撤 ×2.5）已全局弃用，不进入权重。
     """
+    rules = _strategy_rules(strat_key)
     w = w.copy()
 
-    # nonferr trend filter (all strategies)
-    if signals.get("nonferr_below_sma75", False) and "nonferr" in w.index and "credit" in w.index:
-        if w["nonferr"] > 0:
-            w["credit"] += w["nonferr"]
-            w["nonferr"] = 0.0
+    def _zero(asset, sig_key):
+        if signals.get(sig_key, False) and asset in w.index and "credit" in w.index:
+            if w[asset] > 0:
+                w["credit"] += w[asset]
+                w[asset] = 0.0
 
-    # gold trend filter (only V3-B RP)
-    if strat_key == "B-RP":
-        if signals.get("gold_below_sma75", False) and "gold" in w.index and "credit" in w.index:
-            if w["gold"] > 0:
-                w["credit"] += w["gold"]
-                w["gold"] = 0.0
+    # 1. nonferr 趋势过滤（所有策略）
+    if rules.get("nonferr_trend_window"):
+        _zero("nonferr", "nonferr_below_sma75")
 
-    # SP500 trend filter (all strategies now include it)
-    if signals.get("sp500_below_sma75", False) and "us_sp500" in w.index and "credit" in w.index:
-        if w["us_sp500"] > 0:
-            w["credit"] += w["us_sp500"]
-            w["us_sp500"] = 0.0
+    # 2. equity 趋势过滤（按策略：V3c=标普75；B-RP=标普75+沪深300 SMA30）
+    for eq in rules.get("equity_trend_assets") or []:
+        window = rules.get("equity_trend_windows", {}).get(eq, 75)
+        _zero(eq, _eq_signal_key(eq, window))
 
-    # Gold dip: 黄金权重变为 GOLD_DIP_BOOST 倍（从城投债筹资）。
-    # 城投不够则能转多少转多少，禁止静默整笔跳过（否则仪表盘亮了权重不变）。
-    if signals.get("gold_dip_active", False) and "gold" in w.index and "credit" in w.index:
-        if w["gold"] > 0:
-            want = w["gold"] * (GOLD_DIP_BOOST - 1)
-            take = min(float(want), float(w["credit"]))
-            if take > 0:
-                w["gold"] += take
-                w["credit"] -= take
-                if strat_key == "B-Con":
-                    cap = 0.20
-                    if w["gold"] > cap:
-                        w["credit"] += w["gold"] - cap
-                        w["gold"] = cap
+    # 3. gold 趋势过滤（V3c / B-RP）
+    if rules.get("gold_trend_filter"):
+        _zero("gold", "gold_below_sma75")
 
-    # HS300 AND dip: 变为 HS300_DIP_BOOST 倍
-    if signals.get("hs300_dip_ready", False) and "hs300" in w.index and "credit" in w.index:
-        if w["hs300"] > 0:
-            want = w["hs300"] * (HS300_DIP_BOOST - 1)
-            take = min(float(want), float(w["credit"]))
-            if take > 0:
-                w["hs300"] += take
-                w["credit"] -= take
+    # 4. WTI 趋势过滤（所有策略）
+    if rules.get("wti_trend_window"):
+        _zero("wti", "wti_below_sma75")
+
+    # 5. HS300 AND 抄底：仅入场月 ×1.8，从 credit 筹资
+    if rules.get("hs300_value_dip") and signals.get("hs300_dip_entry", False):
+        if "hs300" in w.index and "credit" in w.index and w["hs300"] > 0:
+            boost = w["hs300"] * (HS300_DIP_BOOST - 1)
+            if w["credit"] >= boost:
+                w["hs300"] += boost
+                w["credit"] -= boost
 
     return w
 
@@ -234,9 +327,11 @@ def display_signal_dashboard(signals):
 
     print(f"  nonferr vs SMA75:  {_fmt_bool(signals['nonferr_below_sma75'])}")
     print(f"  gold vs SMA75:     {_fmt_bool(signals['gold_below_sma75'])}")
+    print(f"  WTI vs SMA75:      {_fmt_bool(signals.get('wti_below_sma75', False))}")
     print(f"  SP500 vs SMA{SP500_TREND_WINDOW}:   {_fmt_bool(signals['sp500_below_sma75'])}")
-    print(f"  Gold 回撤:         {au_dd*100:>5.1f}%  ({_fmt_bool(signals['gold_dip_active'], '可抄底', '未触发')})")
-    print(f"  HS300 回撤:        {hs_dd*100:>5.1f}%  ({_fmt_bool(signals['hs300_dd_pct'] <= -HS300_DIP_THRESHOLD, '深度回撤', '正常')})")
+    print(f"  HS300 vs SMA{HS300_TREND_WINDOW}:    {_fmt_bool(signals.get('hs300_below_sma30', False))}")
+    print(f"  Gold 回撤(全程峰): {au_dd*100:>5.1f}%  (抄底规则已弃用,仅展示)")
+    print(f"  HS300 回撤(全程峰):{hs_dd*100:>5.1f}%  ({_fmt_bool(signals['hs300_dd_pct'] <= -HS300_DIP_THRESHOLD, '深度回撤', '正常')})")
 
     pb = signals.get("pb_pctile")
     pe = signals.get("pe_pctile")
@@ -244,7 +339,10 @@ def display_signal_dashboard(signals):
           f"({_fmt_bool(signals.get('pb_entry_ok', False), '便宜 [OK]', '偏贵')})")
     print(f"  PE 分位:           {f'{pe:.0f}%ile' if pe is not None else 'n/a'}  "
           f"({_fmt_bool(pe is not None and pe < 70, '正常', '偏贵需出场')})")
-    print(f"  HS300 AND 抄底:    {'[已就绪]' if signals['hs300_dip_ready'] else '[等待条件]'}")
+    _hs_state = ("入场月×1.8" if signals.get("hs300_dip_entry")
+                 else "持有中(不加仓)" if signals.get("hs300_dip_active")
+                 else "退出" if signals.get("hs300_dip_exit") else "未启动")
+    print(f"  HS300 AND 抄底:    [{_hs_state}]  (月末状态机回放)")
 
 
 def display_weight_table(strat_key, w, signals):
@@ -267,20 +365,29 @@ def display_weight_table(strat_key, w, signals):
             status.append("趋势过滤→credit")
         if a == "gold" and signals.get("gold_below_sma75", False) and pct == 0:
             status.append("趋势过滤→credit")
-        if a == "gold" and signals.get("gold_dip_active", False) and pct > 0:
-            status.append(f"抄底×{GOLD_DIP_BOOST:.0f}")
+        if a == "wti" and signals.get("wti_below_sma75", False) and pct == 0:
+            status.append("趋势过滤→credit")
         if a == "us_sp500" and signals.get("sp500_below_sma75", False) and pct == 0:
             status.append("趋势过滤→credit")
-        if a == "hs300" and signals.get("hs300_dip_ready", False) and pct > 0:
-            status.append(f"AND抄底×{HS300_DIP_BOOST:.1f}")
+        if a == "hs300" and signals.get("hs300_below_sma30", False) and pct == 0:
+            status.append("趋势过滤→credit")
+        if a == "hs300" and signals.get("hs300_dip_entry", False) and pct > 0:
+            status.append(f"AND抄底入场×{HS300_DIP_BOOST:.1f}")
+        elif a == "hs300" and signals.get("hs300_dip_active", False):
+            status.append("抄底持有(不加仓)")
         if a == "credit":
-            nf = signals.get("nonferr_below_sma75", False)
-            sp = signals.get("sp500_below_sma75", False)
-            au = signals.get("gold_below_sma75", False)
+            rules = _strategy_rules(strat_key)
             incoming = []
-            if nf: incoming.append("nonferr")
-            if sp: incoming.append("SP500")
-            if au: incoming.append("gold")
+            if rules.get("nonferr_trend_window") and signals.get("nonferr_below_sma75", False):
+                incoming.append("nonferr")
+            for eq in rules.get("equity_trend_assets") or []:
+                window = rules.get("equity_trend_windows", {}).get(eq, 75)
+                if signals.get(_eq_signal_key(eq, window), False):
+                    incoming.append({"us_sp500": "SP500", "hs300": "HS300"}.get(eq, eq))
+            if rules.get("gold_trend_filter") and signals.get("gold_below_sma75", False):
+                incoming.append("gold")
+            if rules.get("wti_trend_window") and signals.get("wti_below_sma75", False):
+                incoming.append("WTI")
             if incoming:
                 status.append(f"接收{'/'.join(incoming)}")
         s = ", ".join(status) if status else "—"
@@ -431,8 +538,9 @@ def load_hs300_pe():
     return _load()
 
 def load_prices():
-    from .data import load_panel
-    return load_panel()
+    """实盘信号序列：与回测同口径的延长面板（含最新数据）。"""
+    from .data import load_live_panel
+    return load_live_panel()
 
 
 # ============================================================
@@ -482,6 +590,10 @@ def _auto_fetch_if_stale(max_calendar_days=7):
         from .fetch import fetch_market_prices
         fetch_market_prices(force=False)
 
+    # fetch 更新 CSV 后清缓存，确保后续 load_live_panel 读到新数据
+    from .data import clear_series_cache
+    clear_series_cache()
+
 
 # ============================================================
 # 三策略概要
@@ -512,9 +624,11 @@ def _print_trade_tips():
     print("  调仓规则:")
     print("  1. 每月最后一个交易日执行一次")
     print("  2. 先卖后买 — 卖出资金 T+0 可用后再买入")
-    print(f"  3. nonferr/gold/SP500 跌破 SMA → 清仓转 credit")
-    print("  4. 偏离 < 0.5% 不用动，省手续费")
-    print("  5. 标普 500 QDII 经常限购，买不到用场外联接 050025 替代")
+    print("  3. nonferr/gold/WTI/SP500 跌破 SMA75、HS300 跌破 SMA30(仅B-RP) → 清仓转 credit")
+    print("  4. HS300 AND 抄底仅入场月 ×1.8（状态机回放），持有月不再加仓")
+    print("  5. 黄金回撤抄底已按回测口径弃用，不再触发")
+    print("  6. 偏离 < 0.5% 不用动，省手续费")
+    print("  7. 标普 500 QDII 经常限购，买不到用场外联接 050025 替代")
     print(f"{LINE}\n")
 
 
@@ -566,15 +680,19 @@ def _check_and_alert(signals, date_str):
     if signals.get("nonferr_below_sma75", False):
         alerts.append("nonferr 跌破 SMA75 → 已清仓转移至 credit")
     if signals.get("gold_below_sma75", False):
-        alerts.append("gold 跌破 SMA75 → 已清仓转移至 credit")
+        alerts.append("gold 跌破 SMA75 → 已清仓转移至 credit（V3c/B-RP）")
+    if signals.get("wti_below_sma75", False):
+        alerts.append("WTI 跌破 SMA75 → 已清仓转移至 credit")
     if signals.get("sp500_below_sma75", False):
         alerts.append(f"SP500 跌破 SMA{SP500_TREND_WINDOW} → 已清仓转移至 credit")
-    if signals.get("gold_dip_active", False):
-        alerts.append(f"黄金回撤 {signals['gold_dd_pct']*100:.1f}% → 抄底已触发")
-    if signals.get("hs300_dip_ready", False):
-        alerts.append("HS300 AND 抄底信号已就绪！")
+    if signals.get("hs300_below_sma30", False):
+        alerts.append(f"HS300 跌破 SMA{HS300_TREND_WINDOW} → 已清仓转移至 credit（B-RP）")
+    if signals.get("hs300_dip_entry", False):
+        alerts.append("HS300 AND 抄底入场月 → 权重 ×1.8（其余月份不加仓）")
+    elif signals.get("hs300_dip_active", False):
+        alerts.append("HS300 AND 抄底持有中 → 维持基础权重，不再加仓")
     if signals.get("hs300_dip_exit", False):
-        alerts.append("HS300 AND 抄底 → PE分位偏高，建议出场")
+        alerts.append("HS300 AND 抄底退出 → 恢复基础权重（回撤收窄 且 PE 分位>70）")
 
     if alerts:
         print(f"[{date_str}] 风控信号提醒:")

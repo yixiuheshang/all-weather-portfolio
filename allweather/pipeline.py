@@ -18,7 +18,7 @@ from .stats import (
 from .config import (
     STRESS_EVENTS, OUTPUT_DIR,
     BUCKETS, BUCKET_GROUPS, CASH_TIERS,
-    SP500_TREND_WINDOW, HS300_TREND_WINDOW, STRATEGY_PARAMS,
+    SP500_TREND_WINDOW, HS300_TREND_WINDOW, STRATEGY_PARAMS, STRATEGY_RULES,
     V3C_ASSETS, V3B_RP_BUCKETS, V3B_RP_ASSETS,
     V3B_CON_ASSETS,
     RISK_PARITY_TARGET_VOL,
@@ -65,31 +65,42 @@ def step_2_run_backtests(rets):
 
     # ============================================================
     # 公共参数（策略族参数，减少重复）
+    # 趋势/抄底规则统一取自 config.STRATEGY_RULES（单一事实源，
+    # 实盘面板 rebalance.py 读取同一份，保证回测与实盘同规则）。
     # ============================================================
+    _rules = {k: STRATEGY_RULES[k] for k in ("rp", "con", "v3c")}
     _common = dict(
         cash_ratio=0.0,
-        nonferr_trend_window=75,
-        wti_trend_window=75,
-        hs300_value_dip=True,
+        nonferr_trend_window=_rules["v3c"]["nonferr_trend_window"],
+        wti_trend_window=_rules["v3c"]["wti_trend_window"],
+        hs300_value_dip=_rules["v3c"]["hs300_value_dip"],
         track_weights=True, track_signals=True,
         hs300_pb_data=hs300_pb_data, hs300_pe_data=hs300_pe_data,
         hs300_pb_pct=hs300_pb_pct, hs300_pe_pct=hs300_pe_pct,
     )
     _b_rp = dict(rp_window=STRATEGY_PARAMS["rp"]["window"],
-                 gold_trend_filter=True, gold_trend_window=75,
-                 equity_trend_assets=["us_sp500", "hs300"],
-                 equity_trend_windows={"us_sp500": SP500_TREND_WINDOW, "hs300": HS300_TREND_WINDOW},
+                 gold_trend_filter=_rules["rp"]["gold_trend_filter"],
+                 gold_trend_window=_rules["rp"]["gold_trend_window"],
+                 equity_trend_assets=_rules["rp"]["equity_trend_assets"],
+                 equity_trend_windows=_rules["rp"]["equity_trend_windows"],
                  track_dynamic_nav=True,
-                 target_vol=RISK_PARITY_TARGET_VOL, vol_target_window=RISK_PARITY_COV_WINDOW,
-                 gold_dip_threshold=None)
+                 target_vol=_rules["rp"]["target_vol"],
+                 vol_target_window=_rules["rp"]["vol_target_window"],
+                 gold_dip_threshold=_rules["rp"]["gold_dip_threshold"])
     _b_con = dict(rp_window=STRATEGY_PARAMS["con"]["window"], max_w=STRATEGY_PARAMS["con"]["max_w"],
                   weighting_method="inverse_vol",
-                  gold_dip_threshold=None, gold_dip_cap=0.20, track_dynamic_nav=True)
+                  gold_dip_threshold=_rules["con"]["gold_dip_threshold"],
+                  gold_trend_filter=_rules["con"]["gold_trend_filter"],
+                  equity_trend_assets=_rules["con"]["equity_trend_assets"],
+                  track_dynamic_nav=True)
     _iv = dict(iv_window=STRATEGY_PARAMS["v3c"]["window"],
                max_w=STRATEGY_PARAMS["v3c"]["max_w"], min_w=STRATEGY_PARAMS["v3c"]["min_w"],
-               gold_trend_filter=True, gold_trend_window=75,
-               gold_dip_threshold=None, gold_dip_cap=0.20,
-               equity_trend_assets=["us_sp500"], equity_trend_window=75,
+               gold_trend_filter=_rules["v3c"]["gold_trend_filter"],
+               gold_trend_window=_rules["v3c"]["gold_trend_window"],
+               gold_dip_threshold=_rules["v3c"]["gold_dip_threshold"], gold_dip_cap=0.20,
+               equity_trend_assets=_rules["v3c"]["equity_trend_assets"],
+               equity_trend_windows=_rules["v3c"]["equity_trend_windows"],
+               equity_trend_window=SP500_TREND_WINDOW,
                track_dynamic_nav=False)
 
     def _store(name, nv_base, nv_dyn, n, wh, sl):

@@ -82,7 +82,7 @@ py -m allweather.rebalance             # CLI 再平衡
 
 ### 再平衡面板（推荐）
 
-Windows 双击 `streamlit_app/run.bat`（脚本会优先调用 `py`，避免微软商店的 `python` 占位程序闪退）。或：
+Windows 双击 `streamlit_app/run.exe`（太阳+播放键图标，每月调仓点这个）。脚本仍走 `run.bat` / `py`，避免微软商店的 `python` 占位程序闪退。或：
 
 ```bash
 pip install streamlit
@@ -148,7 +148,9 @@ py streamlit_app/run.py
 │   └── pipeline.py          6 步流水线编排
 ├── streamlit_app/           # Web 再平衡面板（推荐）
 │   ├── app.py
-│   ├── run.bat              双击启动
+│   ├── run.exe              每月启动（自定义图标）
+│   ├── run.bat              实际启动脚本
+│   ├── run.ico              启动器图标
 │   └── run.py               自动开浏览器
 ├── joinquant/               # 聚宽平台量化测试代码
 ├── portfolio_comparison/    # 多策略对比工具

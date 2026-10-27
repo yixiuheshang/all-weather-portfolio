@@ -14,6 +14,11 @@ RETRY_DELAY = 5  # 秒
 DEFAULT_START = "20050101"
 DEFAULT_END   = BACKTEST_END.replace("-", "")
 
+# 场内收盘价额外资产：货币 ETF（华宝添益）。仅用于调仓面板现金档仓位，
+# 不进入策略权重/信号计算。
+MONEY_FUND_ASSET = "mf_511880"
+MONEY_FUND_META = {"code": "511880", "name": "货币 ETF（华宝添益）"}
+
 # 资产清单：name -> (kind, symbol)
 TARGETS = {
     # A 股权益 ETF NAV（含分红，不用价格指数）
@@ -324,7 +329,7 @@ def fetch_market_prices(force: bool = False, on_progress=None):
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     ok, errors, up_to_date = {}, [], []
-    items = list(ETF_META.items())
+    items = list(ETF_META.items()) + [(MONEY_FUND_ASSET, MONEY_FUND_META)]
     n = len(items)
     for i, (asset, meta) in enumerate(items, 1):
         if on_progress:
@@ -359,9 +364,9 @@ def fetch_market_prices(force: bool = False, on_progress=None):
 
 
 def load_market_px_panel() -> pd.DataFrame:
-    """8 资产场内收盘价面板，列名与 ETF_META 资产键一致。"""
+    """8 资产 + 货币 ETF 场内收盘价面板，列名与资产键一致。"""
     dfs = {}
-    for asset in ETF_META:
+    for asset, meta in list(ETF_META.items()) + [(MONEY_FUND_ASSET, MONEY_FUND_META)]:
         fp = DATA_DIR / f"{asset}_px.csv"
         if fp.exists():
             df = pd.read_csv(fp, parse_dates=["date"], index_col="date")
@@ -390,7 +395,7 @@ def fetch_all(force: bool = False, start: str = DEFAULT_START, end: str = DEFAUL
 
     for i, (name, (kind, sym)) in enumerate(target_items, 1):
         if on_progress:
-            on_progress(i - 1, n_nav + len(ETF_META), f"净值 {name}")
+            on_progress(i - 1, n_nav + len(ETF_META) + 1, f"净值 {name}")
         path = DATA_DIR / f"{name}.csv"
         if path.exists() and not force:
             # 增量模式 —— 跳过已有日期，只拉新数据

@@ -82,7 +82,7 @@ py -m allweather.rebalance             # CLI rebalancing (legacy)
 
 ### Live rebalance panel (recommended)
 
-On Windows, double-click `streamlit_app/run.bat` (uses the `py` launcher so the Microsoft Store `python` stub does not flash-close). Or:
+On Windows, double-click `streamlit_app/run.exe` (sun + play-button icon; use this for monthly rebalance). It still launches `run.bat` / `py` so the Microsoft Store `python` stub does not flash-close. Or:
 
 ```bash
 pip install streamlit

@@ -200,10 +200,52 @@ STRATEGY_PARAMS = {
     },
 }
 
+# === 策略风控规则（回测/实盘共用，单一事实源）===
+# 与 backtest.py 引擎参数一一对应；pipeline.py 与 rebalance.py 均从此读取，
+# 保证回测与实盘面板执行同一套规则。
+# gold dip（黄金回撤×2.5 抄底）已在回测中弃用：2013 年接飞刀放大亏损
+# （见 PROJECT_HISTORY.md 失败记录），所有策略统一关闭。
+STRATEGY_RULES = {
+    "v3c": {
+        "nonferr_trend_window": 75,          # 有色 SMA75 过滤 → credit
+        "wti_trend_window": 75,              # 原油 SMA75 过滤 → credit
+        "gold_trend_filter": True,           # 黄金 SMA75 过滤 → credit
+        "gold_trend_window": 75,
+        "equity_trend_assets": ["us_sp500"], # 标普 SMA75 过滤 → credit
+        "equity_trend_windows": {"us_sp500": SP500_TREND_WINDOW},
+        "hs300_value_dip": True,             # HS300 AND 抄底（入场月 ×1.8）
+        "gold_dip_threshold": None,          # 黄金抄底：关闭
+        "target_vol": None,
+    },
+    "rp": {
+        "nonferr_trend_window": 75,
+        "wti_trend_window": 75,
+        "gold_trend_filter": True,
+        "gold_trend_window": 75,
+        "equity_trend_assets": ["us_sp500", "hs300"],  # 标普75 + 沪深300 SMA30
+        "equity_trend_windows": {"us_sp500": SP500_TREND_WINDOW, "hs300": HS300_TREND_WINDOW},
+        "hs300_value_dip": True,
+        "gold_dip_threshold": None,
+        "target_vol": RISK_PARITY_TARGET_VOL,
+        "vol_target_window": RISK_PARITY_COV_WINDOW,
+    },
+    "con": {
+        "nonferr_trend_window": 75,
+        "wti_trend_window": 75,
+        "gold_trend_filter": False,          # 保守增强不做黄金趋势过滤
+        "gold_trend_window": 75,
+        "equity_trend_assets": [],           # 也不做标普/沪深300趋势过滤
+        "equity_trend_windows": {},
+        "hs300_value_dip": True,
+        "gold_dip_threshold": None,
+        "target_vol": None,
+    },
+}
+
 # === 策略标签 ===
 PORTFOLIO_TAGS = {
-    "V3-B 保守增强(20d)":  {"stars": "★★★", "label": "保守增强 — 逆波动率 20d + nonferr(75d) + HS300 AND抄底，max_w=0.25"},
-    "V3-B 风险平价(20d)":  {"stars": "★★★", "label": "学院派 — 4桶等权 HRP + nonferr(75d) + Gold(75d) + SP500(75d) + HS300(30d) + HS300 AND抄底"},
-    "V3c 多元":            {"stars": "★★★", "label": "V3c 多元 — 6资产逆波动率20d + nonferr(75d) + gold(75d) + SP500(75d) + HS300 AND抄底"},
+    "V3-B 保守增强(20d)":  {"stars": "★★★", "label": "保守增强 — 逆波动率 20d + nonferr(75d) + WTI(75d) + HS300 AND抄底，max_w=0.25"},
+    "V3-B 风险平价(20d)":  {"stars": "★★★", "label": "学院派 — 4桶等权 HRP + nonferr(75d) + Gold(75d) + WTI(75d) + SP500(75d) + HS300(30d) + HS300 AND抄底 + 目标波动率9%"},
+    "V3c 多元":            {"stars": "★★★", "label": "V3c 多元 — 7资产逆波动率20d + nonferr(75d) + gold(75d) + WTI(75d) + SP500(75d) + HS300 AND抄底"},
 }
 

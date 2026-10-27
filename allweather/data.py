@@ -295,11 +295,17 @@ def _load_with_index(etf_name: str, idx_name: str, annual_deduct: float = 0.0) -
 
 
 
-def load_panel(include_wti: bool = True) -> pd.DataFrame:
+def load_panel(include_wti: bool = True,
+               start: str | None = None,
+               end: str | None = None) -> pd.DataFrame:
     """加载 8 资产收盘价面板（含缝合，对齐到回测期间，前向填充）。
 
     2008+ 延长回测：ETF 上市前的期间用指数/国际价格拼接。
+    start/end 缺省为 BACKTEST_START/BACKTEST_END（回测口径）；
+    实盘面板见 load_live_panel（含最新数据，不截断）。
     """
+    _start = start if start is not None else BACKTEST_START
+    _end = end if end is not None else BACKTEST_END
     # 权益：ETF + 指数 proxy
     hs300 = _load_with_index("hs300", "hs300_idx", annual_deduct=0.0)
     credit = _load_with_index("bond_credit", "credit_idx", annual_deduct=0.0)
@@ -356,7 +362,7 @@ def load_panel(include_wti: bool = True) -> pd.DataFrame:
         panel["wti"] = wti_cny
     panel.index = pd.to_datetime(panel.index)
     panel = panel.sort_index()
-    panel = panel.loc[BACKTEST_START:BACKTEST_END].ffill()
+    panel = panel.loc[_start:_end].ffill()
 
     # 找到所有资产都开始有数据的起始日，而非一个资产缺失就整行删除
     # 避免早期部分资产无 proxy 时截断太狠
@@ -407,6 +413,28 @@ def _load_wti_cny() -> pd.Series:
     wti_proxy = (w * u).dropna()
 
     return stitch_series(sc, wti_proxy, annual_deduct=0.009)
+
+
+def clear_series_cache():
+    """清除 load_series/_load_optional 的 lru_cache。
+
+    fetch 更新 CSV 后必须调用，否则同进程（如 Streamlit 常驻会话）
+    内继续读到旧数据。CLI 短进程通常无需调用。
+    """
+    load_series.cache_clear()
+    _load_optional.cache_clear()
+
+
+def load_live_panel(include_wti: bool = True) -> pd.DataFrame:
+    """实盘信号面板：与 load_panel 完全相同的构建（指数缝合/汇率换算/
+    30Y 合成），但不截断到 BACKTEST_END，包含最新交易日。
+
+    实盘面板的信号与权重必须用这一序列（与回测同口径），而不是
+    直接读取 ETF CSV 做公共对齐——后者会把历史截断到最晚上市 ETF
+    （2024-03），破坏 SMA75/120、3Y 回撤和 HS300 状态回放。
+    下单股数仍用场内未复权收盘价（fetch.load_market_px_panel）。
+    """
+    return load_panel(include_wti=include_wti, start=BACKTEST_START, end="2099-12-31")
 
 
 def load_hs300_pe(col_index: int = 2) -> pd.Series:
