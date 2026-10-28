@@ -16,6 +16,7 @@ data/_ak_macro_gold_cache.csv
 .firecrawl/
 .vscode/
 !.vscode/settings.json
+.workbuddy/
 
 # 临时文件
 *.png

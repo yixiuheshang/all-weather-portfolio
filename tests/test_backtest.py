@@ -467,3 +467,92 @@ class TestSignalLogging:
         assert nv_dyn.iloc[0] == pytest.approx(1.0)
         # 动态 NAV ≠ 基础 NAV（有 target_vol 调整）
         assert not nv_dyn.equals(nv)
+
+
+class TestSignalWatchMode:
+    """高频盯盘模式（rebal_mode="signal_watch"）语义正确性。
+
+    背景：回答"每天跑一次引擎、见信号就调"是否优于月末一次。
+    引擎行为必须先被锁定，实验结论才有意义。
+    """
+
+    def _deterministic_rets(self, n=120):
+        """确定性收益序列：nonferr 前 60 天上行、后 60 天 -2%/天 → 只跌破 SMA10 一次。"""
+        idx = pd.date_range("2022-01-03", periods=n, freq="B")
+        t = np.arange(n)
+        cols = ["hs300", "us_sp500", "credit", "bond_30y", "gold", "nonferr"]
+        data = {}
+        for c in cols:
+            # 平滑波动，保证逆波动率有正方差
+            data[c] = 0.0006 + 0.0008 * np.sin(2 * np.pi * t / 40.0 + hash(c) % 7)
+        data["nonferr"] = np.concatenate([np.full(n // 2, 0.004), np.full(n - n // 2, -0.02)])
+        return pd.DataFrame(data, index=idx)[cols]
+
+    def _run_signal_watch(self, rets, **kw):
+        return backtest(
+            rets, assets=list(rets.columns), weighting_method="inverse_vol",
+            iv_window=20, max_w=0.25, min_w=0.03,
+            nonferr_trend_window=10, gold_trend_filter=False, wti_trend_window=0,
+            gold_dip_threshold=None, hs300_value_dip=False,
+            cash_ratio=0.0, track_weights=True,
+            rebal_mode="signal_watch", **kw,
+        )
+
+    def test_pure_event_driven_trades_once(self):
+        """纯事件驱动：nonferr 只穿越 SMA10 一次 → 只调仓一次，且被清仓转 credit。"""
+        rets = self._deterministic_rets()
+        res = self._run_signal_watch(rets, watch_every=1, watch_keep_month_end=False)
+        assert res.n_rebal == 1, f"期望 1 次事件驱动调仓，实际 {res.n_rebal}"
+        row = res.weight_df.iloc[0]
+        assert row["nonferr"] == 0.0, "跌破后 nonferr 应被清仓"
+        assert row["credit"] > 0.0, "权重应转入 credit"
+
+    def test_month_end_reference_keeps_monthly_cadence(self):
+        """默认 month_end 仍是每月一次（防止新模式的分支改动破坏原行为）。"""
+        rets = self._deterministic_rets()
+        res = backtest(
+            rets, assets=list(rets.columns), weighting_method="inverse_vol",
+            iv_window=20, max_w=0.25, min_w=0.03,
+            nonferr_trend_window=10, gold_trend_filter=False, wti_trend_window=0,
+            gold_dip_threshold=None, hs300_value_dip=False,
+            cash_ratio=0.0, track_weights=True, rebal_mode="month_end",
+        )
+        dates = list(res.weight_df.index)
+        # 调仓日必须是各自月份的最后一个交易日
+        for d in dates:
+            later = rets.index[(rets.index > d) & (rets.index.month == d.month)]
+            assert len(later) == 0, f"{d} 不是当月最后交易日"
+
+    def test_watch_full_trades_every_check(self):
+        """watch_full=True：每次检查都调仓 → 调仓次数远多于纯事件驱动。"""
+        rets = self._deterministic_rets()
+        full = self._run_signal_watch(rets, watch_every=1, watch_full=True,
+                                      watch_keep_month_end=False)
+        event = self._run_signal_watch(rets, watch_every=1, watch_keep_month_end=False)
+        assert full.n_rebal > event.n_rebal
+        assert full.n_rebal >= len(rets) - 21 - 2, "每天检查应基本每天调仓"
+
+    def test_delay_shifts_execution_by_one_day(self):
+        """watch_delay=1：同一触发，执行日整体后移一个交易日。"""
+        rets = self._deterministic_rets()
+        immediate = self._run_signal_watch(rets, watch_every=1, watch_keep_month_end=False)
+        delayed = self._run_signal_watch(rets, watch_every=1, watch_keep_month_end=False,
+                                         watch_delay=1)
+        assert delayed.n_rebal == immediate.n_rebal
+        pos = {d: i for i, d in enumerate(rets.index)}
+        i0 = [pos[d] for d in immediate.weight_df.index]
+        i1 = [pos[d] for d in delayed.weight_df.index]
+        assert all(b - a >= 1 for a, b in zip(i0, i1)), "延迟模式应至少晚一个交易日执行"
+
+    def test_signal_watch_superset_of_monthly(self):
+        """保留月末 + 高频盯盘：调仓次数 ≥ 纯月末。"""
+        rets = self._deterministic_rets()
+        monthly = backtest(
+            rets, assets=list(rets.columns), weighting_method="inverse_vol",
+            iv_window=20, max_w=0.25, min_w=0.03,
+            nonferr_trend_window=10, gold_trend_filter=False, wti_trend_window=0,
+            gold_dip_threshold=None, hs300_value_dip=False,
+            cash_ratio=0.0, track_weights=True, rebal_mode="month_end",
+        )
+        watch = self._run_signal_watch(rets, watch_every=1, watch_keep_month_end=True)
+        assert watch.n_rebal >= monthly.n_rebal

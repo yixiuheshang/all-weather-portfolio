@@ -277,13 +277,26 @@ def backtest(
     rebal_mode: str = REBAL_MODE,
     vol_trigger_threshold: float | None = None,
     month_mid_day: int = 10,
+    watch_every: int = 1,
+    watch_full: bool = False,
+    watch_keep_month_end: bool = True,
+    watch_delay: int = 0,
 ) -> BacktestResult:
     """统一回测引擎 — 逆波动率/分层风险平价 + 趋势过滤 + 抄底。
 
     rebal_mode: 调仓日选择 — month_end(月末最后交易日,默认,远离期货换月窗口)/month_start(月初)/month_mid(当月第 N 交易日)
-                 /vol_trigger(月末基准 + HS300 20d 波动率超阈值时当月额外调仓一次)。
+                 /vol_trigger(月末基准 + HS300 20d 波动率超阈值时当月额外调仓一次)
+                 /signal_watch(高频盯盘，见下)。
     vol_trigger_threshold: vol_trigger 模式的波动率阈值（年化，如 0.30 = 30%）。
     month_mid_day: month_mid 模式选当月第几个交易日（默认 10，用于调仓日历网格实验）。
+
+    signal_watch 模式（回答"每天/隔几天跑一次引擎、见信号就调"是否更好）:
+        watch_every          每 N 个交易日检查一次趋势信号状态（1=每天，5≈每周）。
+        watch_full           True=每次检查都按当日目标权重对齐（等价于每天跑引擎照单执行）；
+                             False=只在信号状态翻转时才调仓。
+        watch_keep_month_end 是否保留月末常规再平衡（逆波动率权重维护）。False=纯事件驱动。
+        watch_delay          看到信号后延迟几个交易日收盘执行（0=当日收盘成交，乐观假设；
+                             实盘至少 T+1，建议用 1 做稳健性检验）。
 
     When track_dynamic_nav=True, returns (nv, nv_dynamic, n_rebal, weight_df, signal_df).
     """
@@ -354,6 +367,37 @@ def backtest(
     rp_buckets_frozen = {k: list(v) for k, v in (rp_buckets or BUCKET_GROUPS).items()}
     initial_w = _compute_weights(rets_rp.iloc[:lookback], weighting_method, iv_window, rp_window, max_w, min_w, bucket_method, rp_buckets_frozen)
 
+    # --- signal_watch 模式：信号状态规格 (asset, col, window) ---
+    _watch_spec: list[tuple[str, int, int]] = []
+    if rebal_mode == "signal_watch":
+        if nonferr_trend_window > 0 and nonferr_idx >= 0:
+            _watch_spec.append(("nonferr", nonferr_idx, nonferr_trend_window))
+        if gold_trend_filter and gold_idx >= 0 and gold_trend_window > 0:
+            _watch_spec.append(("gold", gold_idx, gold_trend_window))
+        if wti_trend_window > 0 and wti_idx >= 0:
+            _watch_spec.append(("wti", wti_idx, wti_trend_window))
+        for _eq in (equity_trend_assets or []):
+            _eq_idx = col_idx.get(_eq)
+            if _eq_idx is None:
+                continue
+            _wdw = equity_trend_windows.get(_eq, equity_trend_window) if equity_trend_windows else equity_trend_window
+            if _wdw > 0:
+                _watch_spec.append((_eq, _eq_idx, _wdw))
+    _last_state: tuple | None = None
+    _pending_rebal = False
+
+    def _watch_state(i: int) -> tuple | None:
+        """当日趋势信号状态（各资产是否跌破各自 SMA）。数据不足返回 None。"""
+        vals = []
+        for _name, _idx, _wdw in _watch_spec:
+            if i <= _wdw or _wdw not in sma_cache:
+                return None
+            _sma_v = sma_cache[_wdw][i, _idx]
+            if not np.isfinite(_sma_v):
+                return None
+            vals.append(bool(price_arr[i, _idx] < _sma_v))
+        return tuple(vals)
+
     # h sums to (1 - cash_ratio), numpy array for fast dot product
     h = initial_w.values * (1 - cash_ratio)
     v = 1.0
@@ -397,15 +441,29 @@ def backtest(
                 hs300_peak = float(price_arr[i, hs300_idx])
 
         # --- Rebalance ---
+        _month_end_t = (i + 1 >= len(rets_rp.index)) or (d.month != rets_rp.index[i + 1].month)
         _rebal_trigger = d.month != rets_rp.index[i - 1].month
         if rebal_mode == "month_end":
-            _rebal_trigger = (i + 1 >= len(rets_rp.index)) or (d.month != rets_rp.index[i + 1].month)
+            _rebal_trigger = _month_end_t
         elif rebal_mode == "month_mid":
             _rebal_trigger = month_seq.iloc[i] == month_mid_day
         elif rebal_mode == "vol_trigger":
-            _month_end_t = (i + 1 >= len(rets_rp.index)) or (d.month != rets_rp.index[i + 1].month)
             _rebal_trigger = _month_end_t or (
                 vol_ann is not None and vol_ann[i] > vol_trigger_threshold and last_rebal_month != d.month)
+        elif rebal_mode == "signal_watch":
+            # 高频盯盘：每 watch_every 个交易日检查信号；翻转即调仓（watch_full=True 则每次都调）。
+            _rebal_trigger = bool(watch_keep_month_end and _month_end_t)
+            if i % watch_every == 0:
+                _st = _watch_state(i)
+                if _st is not None:
+                    _flipped = _last_state is not None and _st != _last_state
+                    _last_state = _st
+                    if watch_full or _flipped:
+                        _rebal_trigger = True
+            if watch_delay > 0:
+                _scheduled = _pending_rebal          # 前面 N 天触发的 → 今天收盘执行
+                _pending_rebal = bool(_rebal_trigger)
+                _rebal_trigger = _scheduled
         if _rebal_trigger and i > lookback:
             last_rebal_month = d.month
             window_df = rets_rp.iloc[max(0, i - lookback):i]
