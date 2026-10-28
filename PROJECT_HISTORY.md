@@ -131,6 +131,41 @@ max_w=0.18 将 credit/bond_10y/bond_30y 三个单资产桶 100% 时间截断在 
 - **ETF close 验证** (`fetch.py`) — 加中位数范围 0.1~5000 保护
 - **USDCNY 除 100 验证** (`fetch.py:181`) — 加中位数范围 5~10 保护
 
+---
+
+## 新增 V3D 混合窗口策略（2026-10-28）
+
+**背景**：SMA75 趋势过滤的稳健性疑问 → 先跑逐资产窗口敏感性网格，发现 gold/sp500 的
+最优窗口在 200 日，而非 75 日。
+
+**决策**：不改动 V3c（避免破坏已验证口径），**并列新增 V3D** 作为分层窗口变体：
+gold/sp500 = SMA200，nonferr/wti = SMA75。
+
+**证据链**：
+- 窗口敏感性网格（`output/sma_window_sensitivity.json`）：50–100 日区间为平滑高原，
+  75 不是孤峰 → 趋势过滤规则本身稳健；各资产最优窗口 nonferr 60 / gold 200 / sp500 200 / wti 60。
+- 混合方案回测（`output/sma_mixed_window_backtest.json`）：CAGR 10.16%→10.83%（+0.68pp），
+  MDD -6.30%→-5.92%，Calmar 1.61→1.83。改善集中在黄金熊市年（2011 +2.26pp、2013 +2.55pp、
+  2015 +2.08pp）；代价在震荡市（2018 -1.21pp、2026YTD -1.15pp）。
+- 子样本检验（`output/sma_mixed_window_subperiod.json`）：前半 +0.87pp、后半 +0.46pp、
+  近 5 年 +0.51pp，两个子样本均占优。
+
+**已记录的风险（不掩饰）**：
+- 200 是在同一份数据上网格选出、又用同一份数据验证 → **二阶数据挖掘**，非样本外证据。
+- 机制本质是"押注黄金走慢周期"；黄金若 V 型急跌，SMA200 比 SMA75 晚约一季度离场。
+- 回测未计交易成本；V3D 沿用含 WTI 口径，与实盘无 WTI 6 资产不同。
+
+**实现要点**：
+- `config.py`：`STRATEGY_RULES["v3d"]` / `STRATEGY_PARAMS["v3d"]` / `V3D_ASSETS` / `PORTFOLIO_NAMES`
+- `rebalance.py`：信号键按窗口泛化（`gold_below_sma{w}`、`sp500_below_sma{w}`），
+  覆盖逻辑按各自规则取键；展示与告警同步
+- `streamlit_app/app.py`：新增 V3D 选项、SMA200 信号条目、窗口感知的状态标注
+- 测试：V3D 端到端一致性 + "V3D 不应响应 SMA75 信号"反向断言（防回归）
+- 文档：`docs/strategy-v3d.md`
+
+**教训（工具层面）**：`stats.perf_metrics` 的 `cum = nv.iloc[-1] - 1` 假设净值序列起点为 1.0，
+做子区间切片对比时必须先归一化，否则后半段 CAGR 会虚高到 23%。
+
 来自外部代码审查，逐条验证后确认全部属实，无 false positive。
 
 ---

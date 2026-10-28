@@ -17,7 +17,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from .config import (
-    DATA_DIR, ASSETS, ETF_META, PORTFOLIO_NAMES, STRATEGY_PARAMS,
+    DATA_DIR, ASSETS, ETF_META, LIVE_STRATEGY_NAMES, STRATEGY_PARAMS,
     STRATEGY_RULES,
     RISK_PARITY_WINDOW, RISK_PARITY_MAX_WEIGHT, RISK_PARITY_MIN_WEIGHT,
     GOLD_DIP_THRESHOLD, GOLD_DIP_BOOST,
@@ -27,6 +27,7 @@ from .config import (
     V3B_RP_ASSETS, V3B_RP_BUCKETS,
     V3B_CON_ASSETS, V3B_CON_BUCKETS,
     V3C_ASSETS,
+    V3D_ASSETS,
 )
 from .risk import (
     inverse_vol_weights, hierarchical_rp_weights, erc_weights,
@@ -37,14 +38,15 @@ _ASSET_MAP = {
     "rp": (V3B_RP_ASSETS, {"buckets": V3B_RP_BUCKETS}),
     "con": (V3B_CON_ASSETS, {}),
     "v3c": (V3C_ASSETS, {}),
+    "v3d": (V3D_ASSETS, {}),
 }
 
-_STRAT_KEY_MAP = {"rp": "B-RP", "con": "B-Con", "v3c": "V3c"}
+_STRAT_KEY_MAP = {"rp": "B-RP", "con": "B-Con", "v3c": "V3c", "v3d": "V3D"}
 STRATEGIES = {}
 for key, params in STRATEGY_PARAMS.items():
     assets, extra = _ASSET_MAP[key]
     STRATEGIES[_STRAT_KEY_MAP[key]] = {
-        "name": PORTFOLIO_NAMES[key], "assets": assets,
+        "name": LIVE_STRATEGY_NAMES[key], "assets": assets,
         **params, **extra,
     }
 
@@ -80,7 +82,7 @@ def _drawdown(prices, asset, lookback=252):
 # 规则映射（与 config.STRATEGY_RULES / 回测引擎一致）
 # ============================================================
 
-_RULES_BY_STRAT = {"B-RP": "rp", "B-Con": "con", "V3c": "v3c"}
+_RULES_BY_STRAT = {"B-RP": "rp", "B-Con": "con", "V3c": "v3c", "V3D": "v3d"}
 
 
 def _strategy_rules(strat_key):
@@ -162,12 +164,28 @@ def compute_signal_states(prices, hs300_pb=None, hs300_pe=None):
 
     signals = {}
 
-    # --- SMA trend filters（窗口取自 STRATEGY_RULES）---
+    # --- SMA trend filters（窗口集合取自 STRATEGY_RULES，覆盖所有策略）---
+    # gold/sp500 各策略窗口可能不同（V3D 用 200），按键名 gold_below_sma{w} /
+    # sp500_below_sma{w} 输出全部用到的窗口，apply_signal_overrides 按各自
+    # 规则取对应键。nonferr/wti/hs300 全策略统一 75/75/30，保持固定键名。
     signals["nonferr_below_sma75"] = _sma_filter(prices, "nonferr", 75)
-    signals["gold_below_sma75"] = _sma_filter(prices, "gold", 75)
     signals["wti_below_sma75"] = _sma_filter(prices, "wti", 75)
-    signals["sp500_below_sma75"] = _sma_filter(prices, "us_sp500", SP500_TREND_WINDOW)
     signals["hs300_below_sma30"] = _sma_filter(prices, "hs300", HS300_TREND_WINDOW)
+
+    _gold_windows = sorted({
+        r.get("gold_trend_window", 75)
+        for r in STRATEGY_RULES.values() if r.get("gold_trend_filter")
+    })
+    for _gw in _gold_windows:
+        signals[f"gold_below_sma{_gw}"] = _sma_filter(prices, "gold", _gw)
+
+    _sp500_windows = sorted({
+        (r.get("equity_trend_windows") or {}).get("us_sp500", 75)
+        for r in STRATEGY_RULES.values()
+        if "us_sp500" in (r.get("equity_trend_assets") or [])
+    })
+    for _sw in _sp500_windows:
+        signals[f"sp500_below_sma{_sw}"] = _sma_filter(prices, "us_sp500", _sw)
 
     # --- Gold 回撤（信息展示；全程峰值口径，与回测 signal log 一致）---
     gold_peak = prices["gold"].max()
@@ -285,9 +303,9 @@ def apply_signal_overrides(strat_key, w, signals, prices=None):
         window = rules.get("equity_trend_windows", {}).get(eq, 75)
         _zero(eq, _eq_signal_key(eq, window))
 
-    # 3. gold 趋势过滤（V3c / B-RP）
+    # 3. gold 趋势过滤（V3c / B-RP / V3D；窗口按策略：V3c=75, V3D=200）
     if rules.get("gold_trend_filter"):
-        _zero("gold", "gold_below_sma75")
+        _zero("gold", f"gold_below_sma{rules.get('gold_trend_window', 75)}")
 
     # 4. WTI 趋势过滤（所有策略）
     if rules.get("wti_trend_window"):
@@ -326,10 +344,15 @@ def display_signal_dashboard(signals):
     hs_dd = signals.get("hs300_dd_pct", 0)
 
     print(f"  nonferr vs SMA75:  {_fmt_bool(signals['nonferr_below_sma75'])}")
-    print(f"  gold vs SMA75:     {_fmt_bool(signals['gold_below_sma75'])}")
     print(f"  WTI vs SMA75:      {_fmt_bool(signals.get('wti_below_sma75', False))}")
-    print(f"  SP500 vs SMA{SP500_TREND_WINDOW}:   {_fmt_bool(signals['sp500_below_sma75'])}")
     print(f"  HS300 vs SMA{HS300_TREND_WINDOW}:    {_fmt_bool(signals.get('hs300_below_sma30', False))}")
+    # gold/sp500 各策略窗口可能不同，全部列出
+    for _gw in sorted(k for k in signals if k.startswith("gold_below_sma")):
+        print(f"  gold vs {_gw.split('_below_')[1]}:    {_fmt_bool(signals[_gw])}"
+              f"{'  (V3D)' if _gw.endswith('200') else '  (V3c/B-RP)'}")
+    for _sw in sorted(k for k in signals if k.startswith("sp500_below_sma")):
+        print(f"  SP500 vs {_sw.split('_below_')[1]}:   {_fmt_bool(signals[_sw])}"
+              f"{'  (V3D)' if _sw.endswith('200') else '  (V3c/B-RP)'}")
     print(f"  Gold 回撤(全程峰): {au_dd*100:>5.1f}%  (抄底规则已弃用,仅展示)")
     print(f"  HS300 回撤(全程峰):{hs_dd*100:>5.1f}%  ({_fmt_bool(signals['hs300_dd_pct'] <= -HS300_DIP_THRESHOLD, '深度回撤', '正常')})")
 
@@ -348,6 +371,9 @@ def display_signal_dashboard(signals):
 def display_weight_table(strat_key, w, signals):
     """单个策略详细权重表。"""
     cfg = STRATEGIES[strat_key]
+    rules = _strategy_rules(strat_key)
+    gold_key = f"gold_below_sma{rules.get('gold_trend_window', 75)}"
+    sp500_key = f"sp500_below_sma{(rules.get('equity_trend_windows') or {}).get('us_sp500', 75)}"
 
     print(f"\n{LINE}")
     print(f"  {cfg['name']}")
@@ -363,11 +389,12 @@ def display_weight_table(strat_key, w, signals):
         status = []
         if a == "nonferr" and signals.get("nonferr_below_sma75", False) and pct == 0:
             status.append("趋势过滤→credit")
-        if a == "gold" and signals.get("gold_below_sma75", False) and pct == 0:
+        if a == "gold" and rules.get("gold_trend_filter") and signals.get(gold_key, False) and pct == 0:
             status.append("趋势过滤→credit")
         if a == "wti" and signals.get("wti_below_sma75", False) and pct == 0:
             status.append("趋势过滤→credit")
-        if a == "us_sp500" and signals.get("sp500_below_sma75", False) and pct == 0:
+        if a == "us_sp500" and "us_sp500" in (rules.get("equity_trend_assets") or []) \
+                and signals.get(sp500_key, False) and pct == 0:
             status.append("趋势过滤→credit")
         if a == "hs300" and signals.get("hs300_below_sma30", False) and pct == 0:
             status.append("趋势过滤→credit")
@@ -376,7 +403,6 @@ def display_weight_table(strat_key, w, signals):
         elif a == "hs300" and signals.get("hs300_dip_active", False):
             status.append("抄底持有(不加仓)")
         if a == "credit":
-            rules = _strategy_rules(strat_key)
             incoming = []
             if rules.get("nonferr_trend_window") and signals.get("nonferr_below_sma75", False):
                 incoming.append("nonferr")
@@ -384,7 +410,7 @@ def display_weight_table(strat_key, w, signals):
                 window = rules.get("equity_trend_windows", {}).get(eq, 75)
                 if signals.get(_eq_signal_key(eq, window), False):
                     incoming.append({"us_sp500": "SP500", "hs300": "HS300"}.get(eq, eq))
-            if rules.get("gold_trend_filter") and signals.get("gold_below_sma75", False):
+            if rules.get("gold_trend_filter") and signals.get(gold_key, False):
                 incoming.append("gold")
             if rules.get("wti_trend_window") and signals.get("wti_below_sma75", False):
                 incoming.append("WTI")
@@ -605,6 +631,8 @@ def display_strategy_summary():
         ("V3-B 保守增强(20d)", "逆波动率 20d", "8.48%", "1.70", "-6.98%", "Sharpe最高，回撤最浅"),
         ("V3-B 风险平价(20d)", "HRP 4桶", "9.61%", "1.43", "-8.61%", "CAGR最高，正统全天候"),
         ("V3c 多元", "逆波动率 60d + SP500趋势", "9.54%", "1.61", "-7.60%", "中位回报，回撤偏低"),
+        ("V3D 混合窗口", "逆波动率 20d + 分层窗口", "10.83%", "1.76", "-5.92%",
+         "V3c 变体：gold/sp500 改 SMA200；样本内选参，见 docs/strategy-v3d.md"),
     ]
     print(f"\n{LINE}")
     print("  策略概要")
@@ -624,7 +652,9 @@ def _print_trade_tips():
     print("  调仓规则:")
     print("  1. 每月最后一个交易日执行一次")
     print("  2. 先卖后买 — 卖出资金 T+0 可用后再买入")
-    print("  3. nonferr/gold/WTI/SP500 跌破 SMA75、HS300 跌破 SMA30(仅B-RP) → 清仓转 credit")
+    print("  3. nonferr/WTI 跌破 SMA75 → 清仓转 credit；"
+          "gold/sp500：V3c/B-RP 看 SMA75，V3D 看 SMA200")
+    print("     HS300 跌破 SMA30 仅 B-RP 清仓")
     print("  4. HS300 AND 抄底仅入场月 ×1.8（状态机回放），持有月不再加仓")
     print("  5. 黄金回撤抄底已按回测口径弃用，不再触发")
     print("  6. 偏离 < 0.5% 不用动，省手续费")
@@ -681,10 +711,14 @@ def _check_and_alert(signals, date_str):
         alerts.append("nonferr 跌破 SMA75 → 已清仓转移至 credit")
     if signals.get("gold_below_sma75", False):
         alerts.append("gold 跌破 SMA75 → 已清仓转移至 credit（V3c/B-RP）")
+    if signals.get("gold_below_sma200", False):
+        alerts.append("gold 跌破 SMA200 → 已清仓转移至 credit（V3D）")
     if signals.get("wti_below_sma75", False):
         alerts.append("WTI 跌破 SMA75 → 已清仓转移至 credit")
     if signals.get("sp500_below_sma75", False):
-        alerts.append(f"SP500 跌破 SMA{SP500_TREND_WINDOW} → 已清仓转移至 credit")
+        alerts.append(f"SP500 跌破 SMA75 → 已清仓转移至 credit（V3c/B-RP）")
+    if signals.get("sp500_below_sma200", False):
+        alerts.append("SP500 跌破 SMA200 → 已清仓转移至 credit（V3D）")
     if signals.get("hs300_below_sma30", False):
         alerts.append(f"HS300 跌破 SMA{HS300_TREND_WINDOW} → 已清仓转移至 credit（B-RP）")
     if signals.get("hs300_dip_entry", False):

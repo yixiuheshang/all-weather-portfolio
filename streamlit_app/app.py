@@ -115,7 +115,7 @@ SIGNAL_ACTIONS = [
         "condition": lambda s: s.get("nonferr_below_sma75", False),
         "sell": _nf,
         "buy": _cr,
-        "strategies": ["B-Con", "B-RP", "V3c"],
+        "strategies": ["B-Con", "B-RP", "V3c", "V3D"],
         "type": "趋势过滤",
     },
     {
@@ -128,12 +128,21 @@ SIGNAL_ACTIONS = [
         "type": "趋势过滤",
     },
     {
+        "key": "gold_below_sma200",
+        "desc": f"{_au} 跌破 SMA200（V3D 专用慢过滤）",
+        "condition": lambda s: s.get("gold_below_sma200", False),
+        "sell": _au,
+        "buy": _cr,
+        "strategies": ["V3D"],
+        "type": "趋势过滤",
+    },
+    {
         "key": "wti_below_sma75",
         "desc": f"{_wt} 跌破 SMA75",
         "condition": lambda s: s.get("wti_below_sma75", False),
         "sell": _wt,
         "buy": _cr,
-        "strategies": ["B-Con", "B-RP", "V3c"],
+        "strategies": ["B-Con", "B-RP", "V3c", "V3D"],
         "type": "趋势过滤",
     },
     {
@@ -143,6 +152,15 @@ SIGNAL_ACTIONS = [
         "sell": _sp,
         "buy": _cr,
         "strategies": ["B-RP", "V3c"],
+        "type": "趋势过滤",
+    },
+    {
+        "key": "sp500_below_sma200",
+        "desc": f"{_sp} 跌破 SMA200（V3D 专用慢过滤）",
+        "condition": lambda s: s.get("sp500_below_sma200", False),
+        "sell": _sp,
+        "buy": _cr,
+        "strategies": ["V3D"],
         "type": "趋势过滤",
     },
     {
@@ -160,7 +178,7 @@ SIGNAL_ACTIONS = [
         "condition": lambda s: s.get("hs300_dip_entry", False),
         "sell": f"{_cr}（筹资）",
         "buy": f"{_hs} ×{HS300_DIP_BOOST:.1f}（仅入场月）",
-        "strategies": ["B-Con", "B-RP", "V3c"],
+        "strategies": ["B-Con", "B-RP", "V3c", "V3D"],
         "type": "抄底加仓（状态机）",
     },
     {
@@ -169,7 +187,7 @@ SIGNAL_ACTIONS = [
         "condition": lambda s: s.get("hs300_dip_active", False) and not s.get("hs300_dip_entry", False),
         "sell": "—",
         "buy": "—（维持基础权重，不重复加仓）",
-        "strategies": ["B-Con", "B-RP", "V3c"],
+        "strategies": ["B-Con", "B-RP", "V3c", "V3D"],
         "type": "抄底持有",
     },
     {
@@ -178,7 +196,7 @@ SIGNAL_ACTIONS = [
         "condition": lambda s: s.get("hs300_dip_exit", False),
         "sell": f"{_hs} 恢复基础权重",
         "buy": _cr,
-        "strategies": ["B-Con", "B-RP", "V3c"],
+        "strategies": ["B-Con", "B-RP", "V3c", "V3D"],
         "type": "抄底退出",
     },
 ]
@@ -309,8 +327,19 @@ else:
 # ============================================================
 # 主区：策略切换（不放侧栏，避免折叠后找不到）
 # ============================================================
-_strat_display = {"B-Con": "V3-B 保守增强", "B-RP": "V3-B 风险平价", "V3c": "V3c 多元"}
-_strat_order = ["B-Con", "B-RP", "V3c"]
+_strat_display = {"B-Con": "V3-B 保守增强", "B-RP": "V3-B 风险平价", "V3c": "V3c 多元", "V3D": "V3D 混合窗口"}
+_strat_order = ["B-Con", "B-RP", "V3c", "V3D"]
+# 各策略的 gold / sp500 趋势窗口（回测与面板共用 config.STRATEGY_RULES，单一事实源）
+_STRAT_CONFIG_KEY = {"B-Con": "con", "B-RP": "rp", "V3c": "v3c", "V3D": "v3d"}
+
+
+def _strat_windows(strat_key):
+    """返回该策略的 gold / sp500 趋势窗口（None 表示该策略不做该过滤）。"""
+    rules = STRATEGY_RULES[_STRAT_CONFIG_KEY[strat_key]]
+    gold_w = rules.get("gold_trend_window") if rules.get("gold_trend_filter") else None
+    eq_windows = rules.get("equity_trend_windows") or {}
+    sp500_w = eq_windows.get("us_sp500") if "us_sp500" in (rules.get("equity_trend_assets") or []) else None
+    return gold_w, sp500_w
 _tier_order = ["100", "85", "70"]
 _def_strat = _saved_state.get("strat", "V3c")
 _def_tier = _saved_state.get("tier", "70")
@@ -496,7 +525,7 @@ with tab2:
     st.subheader(f"{cfg['name']}  —  {tier}% RP")
 
     rows = []
-    rules = STRATEGY_RULES[{"B-Con": "con", "B-RP": "rp", "V3c": "v3c"}[strat_key]]
+    rules = STRATEGY_RULES[_STRAT_CONFIG_KEY[strat_key]]
     for a in cfg["assets"]:
         meta = ETF_META.get(a, {"code": "", "name": a})
         pct = w.get(a, 0)
@@ -505,11 +534,11 @@ with tab2:
         # 趋势过滤（按 STRATEGY_RULES 判定适用性）
         if a == "nonferr" and rules.get("nonferr_trend_window") and signals.get("nonferr_below_sma75") and pct == 0:
             status_parts.append("趋势过滤→已清仓")
-        if a == "gold" and rules.get("gold_trend_filter") and signals.get("gold_below_sma75") and pct == 0:
+        if a == "gold" and rules.get("gold_trend_filter") and signals.get(f"gold_below_sma{rules.get('gold_trend_window', 75)}") and pct == 0:
             status_parts.append("趋势过滤→已清仓")
         if a == "wti" and rules.get("wti_trend_window") and signals.get("wti_below_sma75") and pct == 0:
             status_parts.append("趋势过滤→已清仓")
-        if a == "us_sp500" and "us_sp500" in (rules.get("equity_trend_assets") or []) and signals.get("sp500_below_sma75") and pct == 0:
+        if a == "us_sp500" and "us_sp500" in (rules.get("equity_trend_assets") or []) and signals.get(f"sp500_below_sma{(rules.get('equity_trend_windows') or {}).get('us_sp500', 75)}") and pct == 0:
             status_parts.append("趋势过滤→已清仓")
         if a == "hs300" and "hs300" in (rules.get("equity_trend_assets") or []) and signals.get("hs300_below_sma30") and pct == 0:
             status_parts.append("趋势过滤→已清仓")
@@ -531,11 +560,14 @@ with tab2:
                 incoming.append("有色")
             if rules.get("wti_trend_window") and signals.get("wti_below_sma75"):
                 incoming.append("原油")
-            if rules.get("gold_trend_filter") and signals.get("gold_below_sma75"):
+            if rules.get("gold_trend_filter") and signals.get(f"gold_below_sma{rules.get('gold_trend_window', 75)}"):
                 incoming.append("黄金")
             for eq in rules.get("equity_trend_assets") or []:
                 window = rules.get("equity_trend_windows", {}).get(eq, 75)
-                sig_key = {"us_sp500": "sp500_below_sma75", "hs300": "hs300_below_sma30"}.get(eq)
+                sig_key = {
+                    "us_sp500": f"sp500_below_sma{window}",
+                    "hs300": "hs300_below_sma30",
+                }.get(eq)
                 if sig_key and signals.get(sig_key):
                     incoming.append({"us_sp500": "标普", "hs300": "沪深300"}.get(eq, eq))
             if signals.get("hs300_dip_entry") and pct + 1e-9 < pct0:
@@ -585,11 +617,11 @@ with tab2:
     _tf_assets = []
     if rules.get("nonferr_trend_window") and signals.get("nonferr_below_sma75"):
         _tf_assets.append("有色")
-    if rules.get("gold_trend_filter") and signals.get("gold_below_sma75"):
+    if rules.get("gold_trend_filter") and signals.get(f"gold_below_sma{rules.get('gold_trend_window', 75)}"):
         _tf_assets.append("黄金")
     if rules.get("wti_trend_window") and signals.get("wti_below_sma75"):
         _tf_assets.append("原油")
-    if "us_sp500" in (rules.get("equity_trend_assets") or []) and signals.get("sp500_below_sma75"):
+    if "us_sp500" in (rules.get("equity_trend_assets") or []) and signals.get(f"sp500_below_sma{(rules.get('equity_trend_windows') or {}).get('us_sp500', 75)}"):
         _tf_assets.append("标普")
     if "hs300" in (rules.get("equity_trend_assets") or []) and signals.get("hs300_below_sma30"):
         _tf_assets.append("沪深300")
@@ -815,11 +847,11 @@ with tab4:
                 parts = []
                 if a == "nonferr" and rules.get("nonferr_trend_window") and signals.get("nonferr_below_sma75") and wa == 0:
                     parts.append("趋势过滤→清仓转城投")
-                if a == "gold" and rules.get("gold_trend_filter") and signals.get("gold_below_sma75") and wa == 0:
+                if a == "gold" and rules.get("gold_trend_filter") and signals.get(f"gold_below_sma{rules.get('gold_trend_window', 75)}") and wa == 0:
                     parts.append("趋势过滤→清仓转城投")
                 if a == "wti" and rules.get("wti_trend_window") and signals.get("wti_below_sma75") and wa == 0:
                     parts.append("趋势过滤→清仓转城投")
-                if a == "us_sp500" and "us_sp500" in (rules.get("equity_trend_assets") or []) and signals.get("sp500_below_sma75") and wa == 0:
+                if a == "us_sp500" and "us_sp500" in (rules.get("equity_trend_assets") or []) and signals.get(f"sp500_below_sma{(rules.get('equity_trend_windows') or {}).get('us_sp500', 75)}") and wa == 0:
                     parts.append("趋势过滤→清仓转城投")
                 if a == "hs300" and "hs300" in (rules.get("equity_trend_assets") or []) and signals.get("hs300_below_sma30") and wa == 0:
                     parts.append("趋势过滤→清仓转城投")
@@ -836,10 +868,14 @@ with tab4:
                         incoming.append("有色")
                     if rules.get("wti_trend_window") and signals.get("wti_below_sma75"):
                         incoming.append("原油")
-                    if rules.get("gold_trend_filter") and signals.get("gold_below_sma75"):
+                    if rules.get("gold_trend_filter") and signals.get(f"gold_below_sma{rules.get('gold_trend_window', 75)}"):
                         incoming.append("黄金")
                     for eq in rules.get("equity_trend_assets") or []:
-                        sig_key = {"us_sp500": "sp500_below_sma75", "hs300": "hs300_below_sma30"}.get(eq)
+                        window = rules.get("equity_trend_windows", {}).get(eq, 75)
+                        sig_key = {
+                            "us_sp500": f"sp500_below_sma{window}",
+                            "hs300": "hs300_below_sma30",
+                        }.get(eq)
                         if sig_key and signals.get(sig_key):
                             incoming.append({"us_sp500": "标普", "hs300": "沪深300"}.get(eq, eq))
                     if signals.get("hs300_dip_entry") and wa + 1e-9 < wa0:
@@ -939,11 +975,11 @@ with tab4:
             _tf = []
             if rules.get("nonferr_trend_window") and signals.get("nonferr_below_sma75"):
                 _tf.append("有色")
-            if rules.get("gold_trend_filter") and signals.get("gold_below_sma75"):
+            if rules.get("gold_trend_filter") and signals.get(f"gold_below_sma{rules.get('gold_trend_window', 75)}"):
                 _tf.append("黄金")
             if rules.get("wti_trend_window") and signals.get("wti_below_sma75"):
                 _tf.append("原油")
-            if "us_sp500" in (rules.get("equity_trend_assets") or []) and signals.get("sp500_below_sma75"):
+            if "us_sp500" in (rules.get("equity_trend_assets") or []) and signals.get(f"sp500_below_sma{(rules.get('equity_trend_windows') or {}).get('us_sp500', 75)}"):
                 _tf.append("标普")
             if "hs300" in (rules.get("equity_trend_assets") or []) and signals.get("hs300_below_sma30"):
                 _tf.append("沪深300")
@@ -1049,12 +1085,12 @@ with tab4:
             st.caption("输入持仓股数和/或新增资金后生成买卖清单")
 
 # ============================================================
-# 底部：三策略对比
+# 底部：多策略对比（含 V3D）
 # ============================================================
 st.divider()
-with st.expander("📈 三策略权重对比"):
+with st.expander(f"📈 {len(_strat_order)} 策略权重对比"):
     all_weights = {}
-    for k in ["B-Con", "B-RP", "V3c"]:
+    for k in _strat_order:
         w0_cmp = compute_target_weights(k, prices, cash_ratio)
         w_cmp = apply_signal_overrides(k, w0_cmp, signals, prices)
         all_weights[k] = w_cmp
@@ -1063,7 +1099,7 @@ with st.expander("📈 三策略权重对比"):
     for a in ["hs300", "us_sp500", "credit", "bond_10y", "bond_30y", "gold", "nonferr", "wti"]:
         meta = ETF_META.get(a, {"code": "", "name": a})
         row = {"资产": meta["name"], "代码": meta["code"]}
-        for k in ["B-Con", "B-RP", "V3c"]:
+        for k in _strat_order:
             row[_strat_display[k]] = f"{all_weights[k].get(a, 0)*100:.1f}%"
         cmp_rows.append(row)
 

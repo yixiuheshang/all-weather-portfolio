@@ -112,6 +112,9 @@ V3C_ASSETS = ["hs300", "us_sp500", "credit", "bond_30y", "gold", "nonferr", "wti
 V3C_ASSETS_NO_WTI = ["hs300", "us_sp500", "credit", "bond_30y", "gold", "nonferr"]
 # wti — 南方原油 LOF(501018)，目前申购暂停
 
+# === V3D 资产（与 V3c 相同 7 资产，仅趋势窗口不同）===
+V3D_ASSETS = ["hs300", "us_sp500", "credit", "bond_30y", "gold", "nonferr", "wti"]
+
 # === V3-B 风险平价资产/桶 ===
 V3B_RP_BUCKETS = {
     "增长↑":   ["hs300", "us_sp500"],
@@ -170,12 +173,17 @@ HS300_TREND_WINDOW = 30      # 沪深300 SMA 回看窗口（交易日），跌�
 # 详细分析见 experiments/_analyze_hs300_sma.py
 
 
-# === 策略名称 ===
+# === 策略名称（回测流水线三策略；charts/update_docs 按此查指标）===
 PORTFOLIO_NAMES = {
     "con": "V3-B 保守增强(20d)",
     "rp": "V3-B 风险平价(20d)",
     "v3c": "V3c 多元",
 }
+
+# === 实盘/面板策略名称（含未进入回测流水线的实验性方案）===
+# V3D 只有独立回测结果（见 docs/strategy-v3d.md），不在 main.py 流水线内，
+# 因此不加入 PORTFOLIO_NAMES，避免 charts.py / update_docs.py 查指标时缺键。
+LIVE_STRATEGY_NAMES = {**PORTFOLIO_NAMES, "v3d": "V3D 混合窗口"}
 
 # === 策略核心参数（回测/实盘共用，单一事实源）===
 # method/window/max_w/min_w 在 pipeline.py 和 rebalance.py 间共享
@@ -196,6 +204,12 @@ STRATEGY_PARAMS = {
         "method": "inverse_vol",
         "window": 20,    # 60→20: 更快响应波动率下降（Opus 设计，CAGR +0.47pp）
         "max_w": 0.25,   # 0.30→0.25: 压制 credit 集中（max_w 与 window 交互最优，MDD 1:1 对称）
+        "min_w": 0.03,
+    },
+    "v3d": {
+        "method": "inverse_vol",   # 与 V3c 完全相同，仅趋势窗口不同
+        "window": 20,
+        "max_w": 0.25,
         "min_w": 0.03,
     },
 }
@@ -238,6 +252,24 @@ STRATEGY_RULES = {
         "equity_trend_windows": {},
         "hs300_value_dip": True,
         "gold_dip_threshold": None,
+        "target_vol": None,
+    },
+    # V3D = V3c 的分层窗口版：gold/sp500 用 SMA200（慢熊资产慢过滤），
+    # nonferr/wti 保持 SMA75（急趋势商品快过滤）。
+    # 依据：SMA 窗口敏感性网格（output/sma_window_sensitivity.json）+
+    # 子样本稳健性检验（output/sma_mixed_window_subperiod.json）：
+    # 全区间 +0.68pp CAGR / MDD -6.30%→-5.92%，前后半段子样本均占优。
+    # 风险：200 为同数据网格选出，存在二阶数据挖掘；黄金 V 型急跌时
+    # 慢均线离场更晚。详见 docs/strategy-v3d.md。
+    "v3d": {
+        "nonferr_trend_window": 75,
+        "wti_trend_window": 75,
+        "gold_trend_filter": True,           # 黄金 SMA200 过滤 → credit
+        "gold_trend_window": 200,
+        "equity_trend_assets": ["us_sp500"], # 标普 SMA200 过滤 → credit
+        "equity_trend_windows": {"us_sp500": 200},
+        "hs300_value_dip": True,             # HS300 AND 抄底（入场月 ×1.8）
+        "gold_dip_threshold": None,          # 黄金抄底：关闭
         "target_vol": None,
     },
 }

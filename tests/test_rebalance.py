@@ -167,6 +167,76 @@ def test_v3c_trend_then_dip_credit_reflects_prior_clears():
 
 
 # ============================================================
+# V3D 混合窗口：gold/sp500 用 SMA200，nonferr/wti 仍用 SMA75
+# ============================================================
+
+def test_v3d_gold_trend_filter_clears_to_credit():
+    """V3D 黄金跌破 SMA200 → 清仓转城投债。"""
+    w = _sleeve(gold=0.125, credit=0.25, hs300=0.125, bond_30y=0.25,
+                nonferr=0.125, us_sp500=0.125, wti=0.0)
+    out = apply_signal_overrides("V3D", w, {"gold_below_sma200": True})
+    assert abs(out["gold"]) < 1e-9
+    assert abs(out["credit"] - 0.375) < 1e-9
+    assert abs(out.sum() - w.sum()) < 1e-9
+
+
+def test_v3d_ignores_gold_sma75_signal():
+    """V3D 只看 SMA200：仅有 gold_below_sma75 → 黄金权重不变。"""
+    w = _sleeve(gold=0.125, credit=0.25, hs300=0.125, bond_30y=0.25,
+                nonferr=0.125, us_sp500=0.125, wti=0.0)
+    out = apply_signal_overrides("V3D", w, {"gold_below_sma75": True})
+    assert abs(out["gold"] - 0.125) < 1e-9
+    assert abs(out["credit"] - 0.25) < 1e-9
+
+
+def test_v3d_sp500_trend_filter_clears_to_credit():
+    """V3D 标普500 跌破 SMA200 → 清仓转城投债。"""
+    w = _sleeve(gold=0.125, credit=0.25, hs300=0.125, bond_30y=0.25,
+                nonferr=0.125, us_sp500=0.125, wti=0.125)
+    out = apply_signal_overrides("V3D", w, {"sp500_below_sma200": True})
+    assert abs(out["us_sp500"]) < 1e-9
+    assert abs(out["credit"] - 0.375) < 1e-9
+
+
+def test_v3d_ignores_sp500_sma75_signal():
+    """V3D 标普只看 SMA200：仅有 sp500_below_sma75 → 权重不变。"""
+    w = _sleeve(gold=0.125, credit=0.25, hs300=0.125, bond_30y=0.25,
+                nonferr=0.125, us_sp500=0.125, wti=0.125)
+    out = apply_signal_overrides("V3D", w, {"sp500_below_sma75": True})
+    assert abs(out["us_sp500"] - 0.125) < 1e-9
+
+
+def test_v3d_nonferr_and_wti_still_sma75():
+    """V3D 的有色/原油仍用 SMA75 → 跌破即清仓。"""
+    w = _sleeve(gold=0.125, credit=0.25, hs300=0.125, bond_30y=0.25,
+                nonferr=0.125, us_sp500=0.125, wti=0.125)
+    out = apply_signal_overrides("V3D", w, {
+        "nonferr_below_sma75": True,
+        "wti_below_sma75": True,
+    })
+    assert abs(out["nonferr"]) < 1e-9
+    assert abs(out["wti"]) < 1e-9
+    assert abs(out["credit"] - 0.50) < 1e-9
+
+
+def test_v3d_gold_dip_disabled_no_boost():
+    """V3D 同样不执行黄金抄底（与 V3c 一致，回测口径）。"""
+    w = _sleeve(gold=0.125, credit=0.25, hs300=0.125, bond_30y=0.25,
+                nonferr=0.125, us_sp500=0.125, wti=0.0)
+    out = apply_signal_overrides("V3D", w, {"gold_dip_active": True})
+    assert abs(out["gold"] - 0.125) < 1e-9
+
+
+def test_v3d_hs300_dip_entry_boosts_1_8x():
+    """V3D 的 HS300 抄底与 V3c 同口径：入场月 ×1.8，从 credit 筹资。"""
+    w = _sleeve(hs300=0.125, credit=0.25, gold=0.125, bond_30y=0.25,
+                nonferr=0.125, us_sp500=0.125, wti=0.0)
+    out = apply_signal_overrides("V3D", w, {"hs300_dip_entry": True})
+    assert abs(out["hs300"] - 0.125 * 1.8) < 1e-9
+    assert abs(out["credit"] - (0.25 - 0.125 * 0.8)) < 1e-9
+
+
+# ============================================================
 # 权重合计守恒（无信号时）
 # ============================================================
 
