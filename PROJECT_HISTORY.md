@@ -190,3 +190,28 @@ gold/sp500 = SMA200，nonferr/wti = SMA75。
 - Step 4 重写：完整逆波动率数值演算 + KaTeX 数学公式
 - 打印样式：去阴影加细边框
 - 改完必须 Ctrl+Shift+R 验证（GitHub Pages 有缓存）
+
+## 面板易用性改动（2026-10-28）
+
+**需求**：① 启动图标放到桌面；② 记住方案选择（如 V3D 70% RP），关窗后下次仍是它。
+
+**改动**
+- `streamlit_app/install_desktop_shortcut.py`（新增）：把 `run-icon.png` 用 pillow 转成多尺寸
+  `streamlit_app/run-icon.ico`，再用 WScript.Shell COM 在桌面建「全天候再平衡面板.lnk」
+  （Target=`run.bat`，WorkingDirectory=`streamlit_app`，IconLocation=`run-icon.ico,0`）。
+  桌面目录用 `SHGetFolderPathW(CSIDL_DESKTOPDIRECTORY=0x0010)` 解析，兼容 OneDrive 重定向；
+  没装 pillow 时降级为「PNG 直接嵌进 ICO 容器」（Vista+ 可识别）。`--remove` 可卸载。
+- `streamlit_app/app.py`：策略 / 档位 radio 之后即时对比 `_saved_state`，不同就把
+  `{**_saved_state, "strat", "tier"}` 写回 `data/holdings.json`（保留 holdings 子树、不动 `saved_at`），
+  并在下方给一行 caption 提示当前方案已记住。写盘包 try 兜底，失败不影响面板使用。
+- README.template.md 的「再平衡面板」段落与文件树同步更新，并已重跑 `sync_readme_claude()`
+  重新渲染 README-zh.md（**改启动说明必须改模板，否则会被冲掉**）。
+
+**踩坑**
+- Windows `.lnk` 的 `IconLocation` 只认 `.ico/.exe/.dll`，**不能直接给 PNG**，必须先转换。
+- 桌面快捷方式仍指向 `run.bat`（它已处理微软商店 python 占位导致闪退），不要改成 `python app.py`。
+
+**验证**
+- `py -m pytest -q` → **63 passed**（532s）。
+- AppTest 冒烟：首启默认读回 V3c/70 → radio 切 V3D/70 → 落盘 `strat=V3D, tier=70`，
+  `holdings["V3c"]` 子树原样保留；再起一个新会话自动落在 **V3D | 70**，全程 exception 为空。

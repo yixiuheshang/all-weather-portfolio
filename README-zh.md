@@ -89,7 +89,14 @@ py -m allweather.rebalance             # CLI 再平衡
 
 ### 再平衡面板（推荐）
 
-Windows 双击 `streamlit_app/run.exe`（太阳+播放键图标，每月调仓点这个）。脚本仍走 `run.bat` / `py`，避免微软商店的 `python` 占位程序闪退。或：
+Windows **双击桌面上的「全天候再平衡面板」图标**（太阳+播放键，每月调仓点这个）。图标由这条命令生成：
+
+```bash
+py streamlit_app/install_desktop_shortcut.py            # 生成 run-icon.ico + 桌面快捷方式
+py streamlit_app/install_desktop_shortcut.py --remove   # 不要了就删掉快捷方式
+```
+
+脚本内部走 `run.bat` / `py`，避免微软商店的 `python` 占位程序闪退。不想放桌面可直接双击 `streamlit_app/run.bat`，或：
 
 ```bash
 pip install streamlit
@@ -100,7 +107,7 @@ py streamlit_app/run.py
 
 | 步骤 | 说明 |
 |------|------|
-| 切策略 | 主页面顶部选 V3-B 保守增强 / 风险平价 / V3c / V3D 混合窗口，以及 100%/85%/70% RP |
+| 切策略 | 主页面顶部选 V3-B 保守增强 / 风险平价 / V3c / V3D 混合窗口，以及 100%/85%/70% RP。**选择即时写入 `data/holdings.json`，下次打开自动选中同一方案** |
 | 信号 / 权重 | 用累计净值计算，与回测同一口径 |
 | 场内收盘 | 左侧列表与建仓/调仓表，用于核对券商报价、计算股数（不是累计净值） |
 | 从零建仓 | 「建仓清单」只填**这笔新资金**（空仓首次买入） |
@@ -155,9 +162,11 @@ py streamlit_app/run.py
 │   └── pipeline.py          6 步流水线编排
 ├── streamlit_app/           # Web 再平衡面板（推荐）
 │   ├── app.py
-│   ├── run.exe              每月启动（自定义图标）
+│   ├── app.py               面板（Streamlit）
+│   ├── run-icon.png         图标源图
+│   ├── run-icon.ico         快捷方式图标（脚本生成）
+│   ├── install_desktop_shortcut.py  生成桌面快捷方式
 │   ├── run.bat              实际启动脚本
-│   ├── run.ico              启动器图标
 │   └── run.py               自动开浏览器
 ├── joinquant/               # 聚宽平台量化测试代码
 ├── portfolio_comparison/    # 多策略对比工具

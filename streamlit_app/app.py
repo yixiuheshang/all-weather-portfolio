@@ -363,12 +363,22 @@ with _sel2:
         index=_tier_order.index(_def_tier) if _def_tier in _tier_order else 2,
     )
 
+cash_ratio = 1 - int(tier) / 100
+
+# 方案选择即时记忆：策略 / 档位一改就落盘，关掉窗口下次启动仍是这一档
+if _saved_state.get("strat") != strat_key or _saved_state.get("tier") != tier:
+    _auto_state = {**_saved_state, "strat": strat_key, "tier": tier}
+    try:
+        _save_state(_auto_state)
+        _saved_state = _auto_state
+    except Exception:
+        pass  # 记忆失败不该影响面板正常使用
+st.caption(f"当前方案 **{_strat_display[strat_key]} · {tier}% RP** 已记住，下次打开自动选中。")
+
 missing = [a for a in STRATEGIES[strat_key]["assets"] if a not in prices.columns]
 if missing:
     st.error(f"缺少数据: {missing}")
     st.stop()
-
-cash_ratio = 1 - int(tier) / 100
 
 # ============================================================
 # 计算权重
